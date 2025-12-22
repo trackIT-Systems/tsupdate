@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tsupdate"
+version = "2025.12.1"
+description = "Update daemon for tsOS-based devices using pidiff and Raspberry Pi tryboot"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    {name = "Jonas Höchst", email = "hoechst@trackit.systems"}
+]
+keywords = ["raspberry-pi", "update", "daemon", "a-b-partition", "tryboot", "pidiff"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Systems Administration",
+]
+
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+
+[project.scripts]
+tsupdate = "tsupdate.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/trackit-systems/tsupdate"
+Repository = "https://github.com/trackit-systems/tsupdate"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 120
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
