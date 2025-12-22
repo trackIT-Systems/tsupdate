@@ -17,6 +17,8 @@ A tool for monitoring system status on tsOS-based Raspberry Pi devices, includin
 - **System status monitoring**: Query OS version, partition information, and boot method
 - **Partition detection**: Automatically detects active and inactive partitions
 - **Tryboot detection**: Identifies whether the system was booted via tryboot or regular boot
+- **Tryboot configuration**: Configure tryboot to switch to alternate partition
+- **Boot configuration persistence**: Persist tryboot configuration to make it permanent
 - **OS release parsing**: Reads and parses `/etc/os-release` information
 
 ## A/B Partition Layout
@@ -64,9 +66,46 @@ tsupdate status
 # Show status in JSON format
 tsupdate status --json
 
+# Configure tryboot to switch to alternate partition
+tsupdate tryboot
+
+# Configure tryboot and automatically reboot
+tsupdate tryboot --reboot
+
+# Persist current boot configuration (when booted via tryboot)
+tsupdate persist
+
+# Persist configuration and automatically reboot
+tsupdate persist --reboot
+
 # Show version
 tsupdate --version
 ```
+
+### Command Details
+
+#### `status`
+
+Display system status (OS version, partitions, boot method).
+
+**Options:**
+- `--json`: JSON output
+
+#### `tryboot`
+
+Configure tryboot to switch to alternate partition. Requires regular boot.
+
+**Options:**
+- `--reboot`, `-r`: Reboot after configuration
+
+After configuration, reboot using: `reboot "0 tryboot"`
+
+#### `persist`
+
+Persist current tryboot configuration. Requires tryboot boot.
+
+**Options:**
+- `--reboot`, `-r`: Reboot after persistence
 
 ## Project Structure
 
@@ -79,7 +118,8 @@ tsupdate/
         ├── __init__.py         # Package initialization
         ├── __main__.py         # CLI entry point
         ├── cli.py              # Command-line interface
-        └── status.py           # Status tracking and system information
+        ├── status.py           # Status tracking and system information
+        └── tryboot.py          # Tryboot configuration and persistence
 ```
 
 ## Installation
@@ -161,6 +201,26 @@ Tryboot status is detected by reading the device tree node:
 ```
 
 A non-zero value indicates the system was booted via tryboot.
+
+### Tryboot Configuration
+
+The `tryboot` command configures the system to boot from the alternate partition on the next reboot:
+
+1. Reads the current `cmdline.txt` from `/boot/firmware/`
+2. Creates `tryline.txt` with the partition switched (rootfs ↔ clonefs)
+3. Copies `config.txt` to `tryboot.txt`
+4. Adds `cmdline=tryline.txt` entry to `tryboot.txt`
+
+On reboot with `reboot "0 tryboot"`, the system will boot from the alternate partition.
+
+### Boot Configuration Persistence
+
+The `persist` command makes the current tryboot configuration permanent:
+
+1. Reads `tryline.txt` from `/boot/firmware/`
+2. Writes it back to `cmdline.txt`
+
+This ensures that after a successful tryboot, the new partition becomes the default boot partition.
 
 ### OS Release Parsing
 

@@ -4,6 +4,7 @@ import argparse
 import sys
 from tsupdate import __version__
 from tsupdate.status import get_system_status, format_status_text, format_status_json
+from tsupdate.tryboot import execute_tryboot, execute_persist
 
 
 def main():
@@ -49,6 +50,45 @@ def main():
         help="Output status in JSON format",
     )
     
+    # tryboot command
+    parser_tryboot = subparsers.add_parser(
+        "tryboot",
+        help="Configure tryboot to switch to alternate partition",
+        description=(
+            "Configure tryboot to switch to alternate partition.\n\n"
+            "This command:\n"
+            "  - Copies cmdline.txt to tryline.txt and switches the partition\n"
+            "  - Copies config.txt to tryboot.txt\n"
+            "  - Adds cmdline=tryline.txt entry to tryboot.txt\n\n"
+            "The system must be booted regularly (not via tryboot) to use this command."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser_tryboot.add_argument(
+        "--reboot",
+        "-r",
+        action="store_true",
+        help="Automatically reboot the system after configuring tryboot",
+    )
+    
+    # persist command
+    parser_persist = subparsers.add_parser(
+        "persist",
+        help="Persist current boot configuration",
+        description=(
+            "Persist the current boot configuration by copying tryline.txt to cmdline.txt.\n\n"
+            "This command makes the current tryboot configuration permanent.\n"
+            "The system must be booted via tryboot to use this command."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser_persist.add_argument(
+        "--reboot",
+        "-r",
+        action="store_true",
+        help="Automatically reboot the system after persisting configuration",
+    )
+    
     # Parse arguments
     args = parser.parse_args()
     
@@ -65,6 +105,16 @@ def main():
         else:
             print(format_status_text(status))
         sys.exit(0)
+    
+    # Handle tryboot command
+    if args.command == "tryboot":
+        exit_code = execute_tryboot(reboot=args.reboot)
+        sys.exit(exit_code)
+    
+    # Handle persist command
+    if args.command == "persist":
+        exit_code = execute_persist(reboot=args.reboot)
+        sys.exit(exit_code)
     
     # This should not be reached if argparse is working correctly
     parser.print_help()
