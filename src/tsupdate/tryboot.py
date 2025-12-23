@@ -1,5 +1,6 @@
 """Tryboot tool for switching boot partitions."""
 
+import logging
 import re
 import subprocess
 import sys
@@ -7,6 +8,8 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from tsupdate.status import is_tryboot_active, get_booted_partition
+
+logger = logging.getLogger(__name__)
 
 
 # Boot files directory
@@ -116,21 +119,22 @@ def copy_and_modify_cmdline(target_partition: int, target_label: str) -> bool:
     """
     cmdline_content = read_cmdline_file()
     if cmdline_content is None:
-        print(f"Error: Could not read {CMDLINE_FILE}", file=sys.stderr)
+        logger.error(f"Could not read {CMDLINE_FILE}")
         return False
     
     # Modify the cmdline to use target partition
     modified_cmdline = modify_cmdline_partition(cmdline_content, target_partition)
+    logger.debug(f"Modified cmdline for partition {target_partition}: {modified_cmdline}")
     
     # Write to tryline.txt
     try:
         with open(TRYLINE_FILE, "w", encoding="utf-8") as f:
             f.write(modified_cmdline)
             f.write("\n")
-        print(f"Writing tryline.txt to boot partition {target_label} (p{target_partition})")
+        logger.info(f"Writing tryline.txt to boot partition {target_label} (p{target_partition})")
         return True
     except (OSError, IOError) as e:
-        print(f"Error: Could not write {TRYLINE_FILE}: {e}", file=sys.stderr)
+        logger.error(f"Could not write {TRYLINE_FILE}: {e}")
         return False
 
 
@@ -142,7 +146,7 @@ def copy_config_to_tryboot() -> bool:
         True if successful, False otherwise
     """
     if not CONFIG_FILE.exists():
-        print(f"Error: {CONFIG_FILE} does not exist", file=sys.stderr)
+        logger.error(f"{CONFIG_FILE} does not exist")
         return False
     
     try:
@@ -151,9 +155,10 @@ def copy_config_to_tryboot() -> bool:
         
         with open(TRYBOOT_CONFIG_FILE, "w", encoding="utf-8") as f:
             f.write(config_content)
+        logger.debug(f"Copied {CONFIG_FILE} to {TRYBOOT_CONFIG_FILE}")
         return True
     except (OSError, IOError) as e:
-        print(f"Error: Could not copy {CONFIG_FILE} to {TRYBOOT_CONFIG_FILE}: {e}", file=sys.stderr)
+        logger.error(f"Could not copy {CONFIG_FILE} to {TRYBOOT_CONFIG_FILE}: {e}")
         return False
 
 
@@ -165,7 +170,7 @@ def add_cmdline_entry() -> bool:
         True if successful, False otherwise
     """
     if not TRYBOOT_CONFIG_FILE.exists():
-        print(f"Error: {TRYBOOT_CONFIG_FILE} does not exist", file=sys.stderr)
+        logger.error(f"{TRYBOOT_CONFIG_FILE} does not exist")
         return False
     
     try:
@@ -184,10 +189,13 @@ def add_cmdline_entry() -> bool:
             # Write back
             with open(TRYBOOT_CONFIG_FILE, "w", encoding="utf-8") as f:
                 f.write(content)
+            logger.debug(f"Added cmdline entry to {TRYBOOT_CONFIG_FILE}")
+        else:
+            logger.debug(f"Cmdline entry already present in {TRYBOOT_CONFIG_FILE}")
         
         return True
     except (OSError, IOError) as e:
-        print(f"Error: Could not add cmdline entry to {TRYBOOT_CONFIG_FILE}: {e}", file=sys.stderr)
+        logger.error(f"Could not add cmdline entry to {TRYBOOT_CONFIG_FILE}: {e}")
         return False
 
 
@@ -217,16 +225,17 @@ def persist_boot_configuration() -> bool:
     """
     tryline_content = read_tryline_file()
     if tryline_content is None:
-        print(f"Error: {TRYLINE_FILE} does not exist", file=sys.stderr)
+        logger.error(f"{TRYLINE_FILE} does not exist")
         return False
     
     try:
         with open(CMDLINE_FILE, "w", encoding="utf-8") as f:
             f.write(tryline_content)
             f.write("\n")
+        logger.debug(f"Copied {TRYLINE_FILE} to {CMDLINE_FILE}")
         return True
     except (OSError, IOError) as e:
-        print(f"Error: Could not write {CMDLINE_FILE}: {e}", file=sys.stderr)
+        logger.error(f"Could not write {CMDLINE_FILE}: {e}")
         return False
 
 
@@ -242,40 +251,133 @@ def execute_persist(reboot: bool = False) -> int:
     """
     # Check if tryboot is active
     if is_regular_boot():
-        print(
-            "Error: System is not booted via tryboot.\n"
-            "Persist can only be used when booted via tryboot.",
-            file=sys.stderr
-        )
+        logger.error("System is not booted via tryboot.")
+        logger.error("Persist can only be used when booted via tryboot.")
         return 1
     
     # Get current partition info
     booted = get_booted_partition()
     if not booted:
-        print("Error: Could not determine current boot partition", file=sys.stderr)
+        logger.error("Could not determine current boot partition")
         return 1
     
     _, partition_num, label = booted
     
-    print(f"Current partition: {label} (p{partition_num})")
+    logger.info(f"Current partition: {label} (p{partition_num})")
     
     # Persist configuration
     if not persist_boot_configuration():
         return 1
     
-    print(f"Writing cmdline.txt from tryline.txt to persist boot configuration")
-    print("\nBoot configuration persisted successfully.")
+    logger.info("Writing cmdline.txt from tryline.txt to persist boot configuration")
+    logger.info("Boot configuration persisted successfully.")
     
     if reboot:
-        print("Rebooting system...")
+        logger.info("Rebooting system...")
         try:
             subprocess.run(["reboot"], check=True)
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            print(f"Error: Could not reboot system: {e}", file=sys.stderr)
-            print("Please reboot manually", file=sys.stderr)
+            logger.error(f"Could not reboot system: {e}")
+            logger.error("Please reboot manually")
             return 1
     else:
-        print("Reboot to complete the persistence process.")
+        logger.info("Reboot to complete the persistence process.")
+    
+    return 0
+
+
+def rollback_tryboot(reboot: bool = False) -> int:
+    """
+    Rollback from tryboot to the previous partition.
+    
+    This command restores the boot configuration to the previous partition
+    and removes tryboot configuration files. Used when booted via tryboot
+    but something went wrong and you want to go back.
+    
+    Args:
+        reboot: If True, automatically reboot the system after rollback
+        
+    Returns:
+        Exit code (0 for success, non-zero for failure)
+    """
+    # Check if tryboot is active
+    if is_regular_boot():
+        logger.error("System is not booted via tryboot. Rollback can only be used when booted via tryboot.")
+        return 1
+    
+    # Get current partition (the one we're trying to rollback from)
+    booted = get_booted_partition()
+    if not booted:
+        logger.error("Could not determine current boot partition")
+        return 1
+    
+    _, current_partition_num, current_label = booted
+    
+    # Get the previous partition (the one we want to go back to)
+    from tsupdate.status import get_inactive_partition
+    previous = get_inactive_partition()
+    if not previous:
+        logger.error("Could not determine previous partition")
+        return 1
+    
+    previous_device, previous_partition_num, previous_label = previous
+    
+    logger.info(f"Current partition (tryboot): {current_label} (p{current_partition_num})")
+    logger.info(f"Rolling back to: {previous_label} (p{previous_partition_num})")
+    
+    # Read current cmdline.txt to get base content
+    cmdline_content = read_cmdline_file()
+    if cmdline_content is None:
+        logger.error(f"Could not read {CMDLINE_FILE}")
+        return 1
+    
+    # Modify cmdline to point to previous partition
+    modified_cmdline = modify_cmdline_partition(cmdline_content, previous_partition_num)
+    
+    # Write restored cmdline.txt
+    try:
+        with open(CMDLINE_FILE, "w", encoding="utf-8") as f:
+            f.write(modified_cmdline)
+            f.write("\n")
+        logger.info(f"Restored {CMDLINE_FILE} to point to {previous_label} (p{previous_partition_num})")
+    except (OSError, IOError) as e:
+        logger.error(f"Could not write {CMDLINE_FILE}: {e}")
+        return 1
+    
+    # Remove tryboot configuration files
+    removed_files = []
+    
+    if TRYBOOT_CONFIG_FILE.exists():
+        try:
+            TRYBOOT_CONFIG_FILE.unlink()
+            removed_files.append(TRYBOOT_CONFIG_FILE.name)
+            logger.debug(f"Removed {TRYBOOT_CONFIG_FILE}")
+        except OSError as e:
+            logger.warning(f"Could not remove {TRYBOOT_CONFIG_FILE}: {e}")
+    
+    if TRYLINE_FILE.exists():
+        try:
+            TRYLINE_FILE.unlink()
+            removed_files.append(TRYLINE_FILE.name)
+            logger.debug(f"Removed {TRYLINE_FILE}")
+        except OSError as e:
+            logger.warning(f"Could not remove {TRYLINE_FILE}: {e}")
+    
+    if removed_files:
+        logger.info(f"Removed tryboot configuration files: {', '.join(removed_files)}")
+    
+    logger.info("Rollback complete.")
+    
+    if reboot:
+        logger.info("Rebooting system to complete rollback...")
+        try:
+            subprocess.run(["reboot"], check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            logger.error(f"Could not reboot system: {e}")
+            logger.error("Please reboot manually")
+            return 1
+    else:
+        logger.info("Reboot to complete the rollback process.")
     
     return 0
 
@@ -292,22 +394,19 @@ def execute_tryboot(reboot: bool = False) -> int:
     """
     # Check if already trybooted
     if not is_regular_boot():
-        print(
-            "Error: System is already booted via tryboot.\n"
-            "The config needs to be persisted before doing another tryboot.",
-            file=sys.stderr
-        )
+        logger.error("System is already booted via tryboot.")
+        logger.error("The config needs to be persisted before doing another tryboot.")
         return 1
     
     # Get current and target partitions
     current_partition = get_current_root_partition()
     if current_partition is None:
-        print("Error: Could not determine current boot partition", file=sys.stderr)
+        logger.error("Could not determine current boot partition")
         return 1
     
     target_partition = get_target_partition()
     if target_partition is None:
-        print("Error: Could not determine target partition", file=sys.stderr)
+        logger.error("Could not determine target partition")
         return 1
     
     # Get partition labels for user feedback
@@ -315,8 +414,8 @@ def execute_tryboot(reboot: bool = False) -> int:
     current_label = booted[2] if booted else f"p{current_partition}"
     target_label = "clonefs" if target_partition == 3 else "rootfs"
     
-    print(f"Current partition: {current_label} (p{current_partition})")
-    print(f"Target partition: {target_label} (p{target_partition})")
+    logger.info(f"Current partition: {current_label} (p{current_partition})")
+    logger.info(f"Target partition: {target_label} (p{target_partition})")
     
     # Copy and modify cmdline
     if not copy_and_modify_cmdline(target_partition, target_label):
@@ -330,19 +429,19 @@ def execute_tryboot(reboot: bool = False) -> int:
     if not add_cmdline_entry():
         return 1
     
-    print("Writing tryboot.txt configuration with cmdline reference")
-    print("\nTryboot configuration complete.")
+    logger.info("Writing tryboot.txt configuration with cmdline reference")
+    logger.info("Tryboot configuration complete.")
     
     if reboot:
-        print("Rebooting system to activate tryboot...")
+        logger.info("Rebooting system to activate tryboot...")
         try:
             subprocess.run(["reboot", "0 tryboot"], check=True)
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            print(f"Error: Could not reboot system: {e}", file=sys.stderr)
-            print("Please reboot manually using: reboot \"0 tryboot\"", file=sys.stderr)
+            logger.error(f"Could not reboot system: {e}")
+            logger.error("Please reboot manually using: reboot \"0 tryboot\"")
             return 1
     else:
-        print("To activate tryboot, reboot using: sudo reboot \"0 tryboot\"")
+        logger.info("To activate tryboot, reboot using: sudo reboot \"0 tryboot\"")
     
     return 0
 

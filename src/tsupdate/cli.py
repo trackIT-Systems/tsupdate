@@ -2,9 +2,13 @@
 
 import argparse
 import sys
-from tsupdate import __version__
+from tsupdate import __version__, configure_logging
+from pathlib import Path
+
 from tsupdate.status import get_system_status, format_status_text, format_status_json
-from tsupdate.tryboot import execute_tryboot, execute_persist
+from tsupdate.tryboot import execute_tryboot, execute_persist, rollback_tryboot
+from tsupdate.syncroot import execute_syncroot, execute_mount, execute_unmount
+from tsupdate.apply import execute_apply
 
 
 def main():
@@ -23,6 +27,13 @@ def main():
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
+    )
+    
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable debug logging",
     )
     
     subparsers = parser.add_subparsers(
@@ -89,8 +100,93 @@ def main():
         help="Automatically reboot the system after persisting configuration",
     )
     
+    # rollback command
+    parser_rollback = subparsers.add_parser(
+        "rollback",
+        help="Rollback from tryboot to previous partition",
+        description=(
+            "Rollback from tryboot to the previous partition.\n\n"
+            "This command:\n"
+            "  - Restores cmdline.txt to point to the previous partition\n"
+            "  - Removes tryboot configuration files (tryboot.txt, tryline.txt)\n"
+            "  - Optionally reboots to complete the rollback\n\n"
+            "Used when booted via tryboot but something went wrong and you want to go back.\n"
+            "The system must be booted via tryboot to use this command."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser_rollback.add_argument(
+        "--reboot",
+        "-r",
+        action="store_true",
+        help="Automatically reboot the system after rollback",
+    )
+    
+    # syncroot command
+    parser_syncroot = subparsers.add_parser(
+        "syncroot",
+        help="Sync root partition to inactive partition",
+        description=(
+            "Sync the read-only root partition to the inactive partition.\n\n"
+            "This command:\n"
+            "  - Mounts the inactive partition to /media/root-up\n"
+            "  - Syncs /media/root-ro to /media/root-up using rsync\n"
+            "  - Unmounts the partition after syncing\n\n"
+            "Can only be run when booted regularly or when tryboot is persisted."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    
+    # mount command
+    parser_mount = subparsers.add_parser(
+        "mount",
+        help="Mount inactive partition to /media/root-up",
+        description=(
+            "Mount the inactive partition to /media/root-up.\n\n"
+            "This allows manual access to the inactive partition for inspection or modification."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    
+    # unmount command
+    parser_unmount = subparsers.add_parser(
+        "unmount",
+        help="Unmount inactive partition from /media/root-up",
+        description=(
+            "Unmount the inactive partition from /media/root-up.\n\n"
+            "This unmounts the partition that was previously mounted with the mount command."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    
+    # apply command
+    parser_apply = subparsers.add_parser(
+        "apply",
+        help="Apply pidiff update to inactive partition",
+        description=(
+            "Apply a pidiff update to the inactive partition.\n\n"
+            "This command:\n"
+            "  - Extracts the update archive (tar file)\n"
+            "  - Parses metadata from batch.sh\n"
+            "  - Mounts the inactive partition to /media/root-up\n"
+            "  - Checks version compatibility\n"
+            "  - Applies the update using rsync batch file\n"
+            "  - Unmounts the partition after completion\n\n"
+            "Can only be run when booted regularly or when tryboot is persisted."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser_apply.add_argument(
+        "update_file",
+        type=Path,
+        help="Path to update tar archive file",
+    )
+    
     # Parse arguments
     args = parser.parse_args()
+    
+    # Configure logging based on verbose flag
+    configure_logging(verbose=args.verbose)
     
     # If no command is specified, print help
     if not args.command:
@@ -114,6 +210,31 @@ def main():
     # Handle persist command
     if args.command == "persist":
         exit_code = execute_persist(reboot=args.reboot)
+        sys.exit(exit_code)
+    
+    # Handle rollback command
+    if args.command == "rollback":
+        exit_code = rollback_tryboot(reboot=args.reboot)
+        sys.exit(exit_code)
+    
+    # Handle syncroot command
+    if args.command == "syncroot":
+        exit_code = execute_syncroot()
+        sys.exit(exit_code)
+    
+    # Handle mount command
+    if args.command == "mount":
+        exit_code = execute_mount()
+        sys.exit(exit_code)
+    
+    # Handle unmount command
+    if args.command == "unmount":
+        exit_code = execute_unmount()
+        sys.exit(exit_code)
+    
+    # Handle apply command
+    if args.command == "apply":
+        exit_code = execute_apply(args.update_file)
         sys.exit(exit_code)
     
     # This should not be reached if argparse is working correctly
