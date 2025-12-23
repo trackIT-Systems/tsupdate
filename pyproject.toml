@@ -22,7 +22,9 @@ classifiers = [
     "Topic :: System :: Systems Administration",
 ]
 
-dependencies = []
+dependencies = [
+    "PyGithub>=2.0.0",
+]
 
 [project.optional-dependencies]
 dev = [

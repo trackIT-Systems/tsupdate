@@ -1,15 +1,106 @@
 """Command-line interface for tsupdate."""
 
 import argparse
+import os
 import sys
-from tsupdate import __version__, configure_logging, is_root
 from pathlib import Path
+from typing import Optional
 
-from tsupdate.status import get_system_status, format_status_text, format_status_json
+from tsupdate import __version__, configure_logging, is_root
+from tsupdate.status import get_system_status, format_status_text, format_status_json, read_booted_os_release
 from tsupdate.tryboot import execute_tryboot, execute_persist, rollback_tryboot
 from tsupdate.syncroot import execute_syncroot, execute_mount, execute_unmount
 from tsupdate.apply import execute_apply
 from tsupdate.restore import execute_restore
+from tsupdate.github import parse_github_repo_url, fetch_releases, find_latest_image, find_applicable_batch_update
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def execute_check(include_prereleases: bool = False, max_releases: int = 5, github_url: Optional[str] = None) -> int:
+    """
+    Execute the check command.
+    
+    Checks GitHub releases for latest image and applicable batch update.
+    Reads GH_TOKEN from environment variable for GitHub authentication.
+    
+    Args:
+        include_prereleases: If True, include pre-releases in the search
+        max_releases: Maximum number of recent releases to check for batch updates
+        github_url: Optional GitHub repository URL (overrides SUPPORT_URL from os-release)
+    
+    Returns:
+        Exit code (0 for success, non-zero for failure)
+    """
+    # Read os-release (needed for VERSION_ID, and possibly SUPPORT_URL)
+    os_release = read_booted_os_release()
+    if not os_release:
+        logger.error("Could not read /etc/os-release")
+        return 1
+    
+    # Get GitHub URL - use provided URL or fall back to SUPPORT_URL from os-release
+    if github_url:
+        support_url = github_url
+        logger.debug(f"Using provided GitHub URL: {support_url}")
+    else:
+        support_url = os_release.get("SUPPORT_URL")
+        if not support_url:
+            logger.error("SUPPORT_URL not found in /etc/os-release and no GitHub URL provided")
+            return 1
+        logger.debug(f"Using SUPPORT_URL from os-release: {support_url}")
+    
+    # Get VERSION_ID from os-release (needed for batch update matching)
+    version_id = os_release.version_id
+    if not version_id:
+        logger.error("VERSION_ID not found in /etc/os-release")
+        return 1
+    
+    logger.debug(f"VERSION_ID: {version_id}")
+    
+    # Parse GitHub repo URL
+    repo_info = parse_github_repo_url(support_url)
+    if not repo_info:
+        logger.error(f"Could not parse GitHub repository URL: {support_url}")
+        return 1
+    
+    owner, repo = repo_info
+    logger.debug(f"GitHub repository: {owner}/{repo}")
+    
+    # Fetch releases
+    releases = fetch_releases(owner, repo, include_prereleases=include_prereleases)
+    if not releases:
+        logger.error("Could not fetch releases from GitHub")
+        return 1
+    
+    # Find latest image
+    image_url = find_latest_image(releases)
+    
+    # Find applicable batch update
+    batch_url = find_applicable_batch_update(releases, version_id, max_releases=max_releases)
+    
+    # Print results with formatting
+    print("\nGitHub Releases Check")
+    print("=" * 60)
+    
+    if image_url:
+        print(f"✓ Latest Release Image:")
+        print(f"  {image_url}")
+    else:
+        print("✗ Latest Release Image: Not found")
+    
+    print()
+    
+    if batch_url:
+        print(f"✓ Next Applicable Batch Update:")
+        print(f"  {batch_url}")
+    else:
+        print(f"✗ Next Applicable Batch Update: Not found")
+        print(f"  (current version: {version_id})")
+    
+    print()
+    
+    return 0
 
 
 def main():
@@ -167,6 +258,7 @@ def main():
         description=(
             "Apply a pidiff update to the inactive partition.\n\n"
             "This command:\n"
+            "  - Downloads the update archive from URL (or uses local file)\n"
             "  - Extracts the update archive (tar file)\n"
             "  - Parses metadata from batch.sh\n"
             "  - Mounts the inactive partition to /media/root-up\n"
@@ -179,8 +271,14 @@ def main():
     )
     parser_apply.add_argument(
         "update_file",
-        type=Path,
-        help="Path to update tar archive file",
+        type=str,
+        help="URL or local file path to update tar archive file",
+    )
+    parser_apply.add_argument(
+        "--keep-download",
+        "-k",
+        action="store_true",
+        help="Keep downloaded file after apply",
     )
     
     # restore command
@@ -217,6 +315,41 @@ def main():
         "-k",
         action="store_true",
         help="Keep downloaded image file after restore",
+    )
+    
+    # check command
+    parser_check = subparsers.add_parser(
+        "check",
+        help="Check GitHub releases for latest image and applicable batch update",
+        description=(
+            "Check GitHub releases for latest image and applicable batch update.\n\n"
+            "This command:\n"
+            "  - Reads SUPPORT_URL from /etc/os-release\n"
+            "  - Queries GitHub Releases API\n"
+            "  - Finds the latest release's image file URL\n"
+            "  - Finds the next applicable batch update tar file (compatible with current version)\n\n"
+            "The batch update file name format is: tsOS-{variant}-arm64-update-{current_version}-to-{next_version}.tar\n\n"
+            "By default, only regular releases are considered. Use --pre to include pre-releases."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser_check.add_argument(
+        "--pre",
+        action="store_true",
+        help="Include pre-releases in the search",
+    )
+    parser_check.add_argument(
+        "--max-releases",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Maximum number of recent releases to check for batch updates (default: 5)",
+    )
+    parser_check.add_argument(
+        "--github-url",
+        type=str,
+        metavar="URL",
+        help="GitHub repository URL (overrides SUPPORT_URL from /etc/os-release). Example: https://github.com/owner/repo",
     )
     
     # Parse arguments
@@ -280,7 +413,7 @@ def main():
     
     # Handle apply command
     if args.command == "apply":
-        exit_code = execute_apply(args.update_file)
+        exit_code = execute_apply(args.update_file, keep_download=args.keep_download)
         sys.exit(exit_code)
     
     # Handle restore command
@@ -289,6 +422,15 @@ def main():
             image_source=args.image_source,
             partition=args.partition,
             keep_image=args.keep_image,
+        )
+        sys.exit(exit_code)
+    
+    # Handle check command
+    if args.command == "check":
+        exit_code = execute_check(
+            include_prereleases=args.pre,
+            max_releases=args.max_releases,
+            github_url=args.github_url
         )
         sys.exit(exit_code)
     

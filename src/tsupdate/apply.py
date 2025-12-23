@@ -19,6 +19,7 @@ from tsupdate.syncroot import (
     unmount_partition,
     ROOT_UP,
 )
+from tsupdate.utils import ARTIFACTS_DIR, ensure_file
 
 logger = logging.getLogger(__name__)
 
@@ -448,18 +449,20 @@ def handle_rsync_exit_code(exit_code: int) -> str:
     return messages.get(exit_code, f"Error: Update failed with exit code {exit_code}")
 
 
-def execute_apply(update_file: Path) -> int:
+def execute_apply(update_source: str, keep_download: bool = False) -> int:
     """
     Execute the apply update process.
     
+    Reads GH_TOKEN from environment variable for GitHub authentication.
+    
     Args:
-        update_file: Path to update tar archive
+        update_source: URL or local file path to update tar archive
+        keep_download: If True, keep downloaded file after apply
         
     Returns:
         Exit code (0 for success, non-zero for failure)
     """
-    logger.debug(f"Starting apply process for update file: {update_file}")
-    logger.debug(f"Update file absolute path: {update_file.resolve()}")
+    logger.debug(f"Starting apply process for update source: {update_source}")
     
     # Check if apply can be run
     logger.debug("Checking if apply can be run (regular boot or persisted tryboot)")
@@ -483,16 +486,30 @@ def execute_apply(update_file: Path) -> int:
         _, partition_num, label = inactive
         logger.info(f"Inactive partition: {label} (p{partition_num})")
     
-    # Extract update archive
-    logger.debug(f"Extracting update archive: {update_file}")
-    extracted_dir = extract_update_archive(update_file)
-    if not extracted_dir:
-        logger.error("Failed to extract update archive")
-        return 1
-    logger.debug(f"Update archive extracted to: {extracted_dir}")
-    
+    # Ensure file is available (download from URL if needed)
+    artifacts_path = ARTIFACTS_DIR
+    update_file_path = None
+    is_local_file = False
+    extracted_dir = None
     temp_dir_cleanup = True
+    
     try:
+        update_file_path, is_local_file = ensure_file(update_source, artifacts_path)
+        if update_file_path is None:
+            logger.error("Failed to obtain update file")
+            return 1
+        
+        logger.debug(f"Update file path: {update_file_path}")
+        logger.debug(f"Update file absolute path: {update_file_path.resolve()}")
+        
+        # Extract update archive
+        logger.debug(f"Extracting update archive: {update_file_path}")
+        extracted_dir = extract_update_archive(update_file_path)
+        if not extracted_dir:
+            logger.error("Failed to extract update archive")
+            return 1
+        logger.debug(f"Update archive extracted to: {extracted_dir}")
+        
         # Find batch.sh file
         batch_sh = extracted_dir / "batch.sh"
         if not batch_sh.exists():
@@ -559,7 +576,9 @@ def execute_apply(update_file: Path) -> int:
             
             # Find rsync batch file
             logger.debug(f"Looking for rsync batch file in extracted directory: {extracted_dir}")
-            batch_file = find_rsync_batch_file(extracted_dir, update_file.name)
+            # Use original source filename for finding batch file
+            source_filename = Path(update_source).name
+            batch_file = find_rsync_batch_file(extracted_dir, source_filename)
             if not batch_file:
                 logger.error("Could not find rsync batch file in update archive")
                 logger.debug(f"Contents of extracted directory: {list(extracted_dir.iterdir())}")
@@ -609,6 +628,19 @@ def execute_apply(update_file: Path) -> int:
                 logger.debug(f"Removed temporary directory: {extracted_dir}")
             except OSError as e:
                 logger.warning(f"Could not remove temporary directory {extracted_dir}: {e}")
+        
+        # Cleanup: remove downloaded file unless keep_download is set or it's a local file
+        if not keep_download and not is_local_file:
+            try:
+                if update_file_path and update_file_path.exists():
+                    update_file_path.unlink()
+                    logger.debug(f"Removed downloaded file: {update_file_path}")
+            except OSError as e:
+                logger.warning(f"Could not remove downloaded file: {e}")
+        elif is_local_file:
+            logger.debug("Using local file, no cleanup needed")
+        else:
+            logger.info(f"Keeping downloaded file in {artifacts_path}")
     
     return 0
 

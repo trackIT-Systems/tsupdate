@@ -10,7 +10,6 @@ import time
 import zipfile
 from pathlib import Path
 from typing import Optional
-from urllib.request import urlretrieve
 
 from tsupdate.syncroot import (
     can_run_syncroot,
@@ -20,6 +19,7 @@ from tsupdate.syncroot import (
     ROOT_UP,
     sync_root_partitions,
 )
+from tsupdate.utils import ARTIFACTS_DIR, ensure_file
 
 logger = logging.getLogger(__name__)
 
@@ -27,52 +27,6 @@ logger = logging.getLogger(__name__)
 # Mount points and directories
 IMAGE_MOUNT = Path("/media/image-rootfs")
 LOOP_DEVICE_PREFIX = "/dev/loop"
-ARTIFACTS_DIR = Path("/data/tsupdate")
-
-
-def download_image(url: str, output_path: Path) -> bool:
-    """
-    Download OS image from URL.
-    
-    Downloads to a temporary file first, then renames to the final path
-    on success to avoid corrupt files if interrupted.
-    
-    Args:
-        url: URL to download from
-        output_path: Path where to save the downloaded file
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    temp_path = output_path.with_suffix(output_path.suffix + ".tmp")
-    
-    try:
-        logger.info(f"Downloading image from {url}...")
-        logger.debug(f"Downloading to temporary file: {temp_path}")
-        
-        def reporthook(blocknum, blocksize, totalsize):
-            if totalsize > 0:
-                percent = min(100, (blocknum * blocksize * 100) / totalsize)
-                if blocknum % 100 == 0:  # Update every 100 blocks
-                    logger.debug(f"Download progress: {percent:.1f}%")
-        
-        # Download to temporary file
-        urlretrieve(url, str(temp_path), reporthook=reporthook)
-        
-        # Rename temporary file to final path (atomic operation)
-        temp_path.rename(output_path)
-        logger.info(f"Downloaded image to {output_path}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to download image: {e}")
-        # Clean up temporary file on failure
-        try:
-            if temp_path.exists():
-                temp_path.unlink()
-                logger.debug(f"Removed temporary download file: {temp_path}")
-        except OSError:
-            pass  # Ignore cleanup errors
-        return False
 
 
 def find_largest_img_in_zip(zip_path: Path) -> Optional[str]:
@@ -314,6 +268,8 @@ def execute_restore(
     """
     Execute the restore process.
     
+    Reads GH_TOKEN from environment variable for GitHub authentication.
+    
     Args:
         image_source: URL or local file path to OS image
         partition: Partition number in image to use as rootfs (default: 2)
@@ -340,14 +296,6 @@ def execute_restore(
         _, partition_num, label = inactive
         logger.info(f"Inactive partition: {label} (p{partition_num})")
     
-    # Ensure artifacts directory exists
-    try:
-        ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-        logger.debug(f"Using artifacts directory: {ARTIFACTS_DIR}")
-    except OSError as e:
-        logger.error(f"Could not create artifacts directory {ARTIFACTS_DIR}: {e}")
-        return 1
-    
     # Use artifacts directory for downloaded/extracted images
     artifacts_path = ARTIFACTS_DIR
     image_path = None
@@ -358,55 +306,19 @@ def execute_restore(
     downloaded_path = None
     
     try:
-        # Check if image_source is a URL or local file path
-        source_path = Path(image_source)
-        if source_path.exists() and source_path.is_file():
-            # Local file path
-            is_local_file = True
-            logger.info(f"Using local image file: {image_source}")
-            downloaded_path = source_path
-        else:
-            # URL - check if already downloaded, otherwise download
-            # Determine image file name from URL
-            image_filename = Path(image_source).name
-            if not image_filename or image_filename == image_source:
-                # Fallback to generic name
-                image_filename = "os-image.img"
-            
-            downloaded_path = artifacts_path / image_filename
-            
-            # Clean up any leftover temporary files from interrupted downloads
-            temp_download_path = downloaded_path.with_suffix(downloaded_path.suffix + ".tmp")
-            if temp_download_path.exists():
-                try:
-                    temp_download_path.unlink()
-                    logger.debug(f"Removed leftover temporary download file: {temp_download_path}")
-                except OSError:
-                    pass  # Ignore cleanup errors
-            
-            # Check if file already exists
-            if downloaded_path.exists() and downloaded_path.is_file():
-                file_size = downloaded_path.stat().st_size
-                if file_size > 0:
-                    logger.info(f"Image file already exists: {downloaded_path} ({file_size} bytes)")
-                    logger.info("Skipping download, using existing file")
-                else:
-                    logger.warning(f"Existing file is empty, re-downloading")
-                    downloaded_path.unlink()
-                    if not download_image(image_source, downloaded_path):
-                        return 1
-            else:
-                # Download image
-                logger.info(f"Downloading image from URL: {image_source}")
-                if not download_image(image_source, downloaded_path):
-                    return 1
+        # Ensure file is available (download from URL if needed)
+        downloaded_path, is_local_file = ensure_file(image_source, artifacts_path)
+        if downloaded_path is None:
+            logger.error("Failed to obtain image file")
+            return 1
         
         # Check if image needs extraction
         image_path = downloaded_path
-        needs_extraction = (
-            downloaded_path.suffix in (".gz", ".xz", ".zip") 
-            or downloaded_path.suffixes[-1] in (".gz", ".xz", ".zip")
-        )
+        needs_extraction = False
+        if downloaded_path.suffix in (".gz", ".xz", ".zip"):
+            needs_extraction = True
+        elif downloaded_path.suffixes and downloaded_path.suffixes[-1] in (".gz", ".xz", ".zip"):
+            needs_extraction = True
         
         if needs_extraction:
             # Determine extracted filename based on downloaded file name
