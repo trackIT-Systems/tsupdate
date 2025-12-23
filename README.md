@@ -1,126 +1,21 @@
 # tsupdate
 
-A tool for monitoring system status on tsOS-based Raspberry Pi devices, including OS version, partition information, and tryboot boot method detection.
+Update daemon for tsOS-based Raspberry Pi devices with A/B partition management and safe rollback.
 
 ## Overview
 
-`tsupdate` is a Python-based tool for monitoring system status on tsOS-based Raspberry Pi devices. It provides information about:
+`tsupdate` manages OS updates on Raspberry Pi devices using an A/B partition scheme with the tryboot mechanism for safe, atomic updates with automatic rollback.
 
-- **OS version**: Reads and displays version information from `/etc/os-release`
-- **A/B partition scheme**: Detects active and inactive partitions (rootfs/clonefs)
-- **Raspberry Pi tryboot**: Identifies whether the system was booted via tryboot or regular boot
+## Features
 
-## Current Status
-
-### Implemented Features
-
-- **System status monitoring**: Query OS version, partition information, and boot method
-- **Partition detection**: Automatically detects active and inactive partitions
-- **Tryboot detection**: Identifies whether the system was booted via tryboot or regular boot
-- **Tryboot configuration**: Configure tryboot to switch to alternate partition
-- **Boot configuration persistence**: Persist tryboot configuration to make it permanent
-- **OS release parsing**: Reads and parses `/etc/os-release` information
-
-## A/B Partition Layout
-
-tsOS devices use a dual root partition layout:
-
-- **mmcblk0p2 (rootfs)**: Primary root partition (A)
-- **mmcblk0p3 (clonefs)**: Backup/alternate root partition (B)
-
-At any time, one partition is active (currently booted) and the other is inactive.
-
-## Tryboot Mechanism
-
-The Raspberry Pi's tryboot feature provides hardware-level boot selection:
-
-- On first boot attempt, tryboot loads the new partition
-- A boot counter tracks boot attempts
-- If the system fails to boot properly (counter reaches limit), tryboot automatically reverts to the previous working partition
-
-This ensures that a bad update can never brick the device.
-
-## Version Scheme
-
-tsupdate uses a time-based versioning scheme:
-
-```
-<YEAR>.<MONTH>.<COUNT>
-
-Examples:
-  2025.12.1  → First release in December 2025
-  2025.12.2  → Second release in December 2025
-  2026.01.1  → First release in January 2026
-```
-
-Version information is extracted from `/etc/os-release` (specifically the `VERSION_ID` and `VERSION_COMMIT` fields).
-
-## CLI Commands
-
-### Available Commands
-
-```bash
-# Show current system status
-tsupdate status
-
-# Show status in JSON format
-tsupdate status --json
-
-# Configure tryboot to switch to alternate partition
-tsupdate tryboot
-
-# Configure tryboot and automatically reboot
-tsupdate tryboot --reboot
-
-# Persist current boot configuration (when booted via tryboot)
-tsupdate persist
-
-# Persist configuration and automatically reboot
-tsupdate persist --reboot
-
-# Show version
-tsupdate --version
-```
-
-### Command Details
-
-#### `status`
-
-Display system status (OS version, partitions, boot method).
-
-**Options:**
-- `--json`: JSON output
-
-#### `tryboot`
-
-Configure tryboot to switch to alternate partition. Requires regular boot.
-
-**Options:**
-- `--reboot`, `-r`: Reboot after configuration
-
-After configuration, reboot using: `reboot "0 tryboot"`
-
-#### `persist`
-
-Persist current tryboot configuration. Requires tryboot boot.
-
-**Options:**
-- `--reboot`, `-r`: Reboot after persistence
-
-## Project Structure
-
-```
-tsupdate/
-├── README.md                   # This file
-├── pyproject.toml              # Project metadata and dependencies
-└── src/
-    └── tsupdate/
-        ├── __init__.py         # Package initialization
-        ├── __main__.py         # CLI entry point
-        ├── cli.py              # Command-line interface
-        ├── status.py           # Status tracking and system information
-        └── tryboot.py          # Tryboot configuration and persistence
-```
+- **System status monitoring** - View OS version, partitions, and boot method
+- **A/B partition management** - Dual root partitions (rootfs/clonefs) for safe updates
+- **Tryboot integration** - Hardware-backed boot failsafe with automatic rollback
+- **Incremental updates** - Apply rsync-based differential updates (pidiff)
+- **Image restoration** - Restore complete OS images from various formats
+- **GitHub integration** - Check for available updates from GitHub releases
+- **Partition operations** - Mount, unmount, and sync partitions
+- **Boot management** - Configure, persist, and rollback boot configurations
 
 ## Installation
 
@@ -129,110 +24,197 @@ tsupdate/
 git clone https://github.com/trackit-systems/tsupdate.git
 cd tsupdate
 pip install -e .
-
-# Or install from PyPI (when published)
-pip install tsupdate
 ```
 
-After installation, you can run `tsupdate` directly:
+## Commands
+
+### System Information
+
+**`status`** - Display current system status (OS version, partitions, boot method)
 
 ```bash
-tsupdate status
+tsupdate status          # Human-readable output
+tsupdate status --json   # JSON output
 ```
 
-## Development
+### Boot Management
+
+**`tryboot`** - Configure tryboot to switch to alternate partition
 
 ```bash
-# Clone repository
-git clone https://github.com/trackit-systems/tsupdate.git
-cd tsupdate
+sudo tsupdate tryboot              # Configure and reboot automatically
+sudo tsupdate tryboot --no-reboot  # Configure without reboot
+```
 
-# Install with dev dependencies
-pip install -e ".[dev]"
+**`persist`** - Make tryboot configuration permanent
 
-# Run tests
-pytest
+```bash
+sudo tsupdate persist           # Persist configuration
+sudo tsupdate persist --reboot  # Persist and reboot
+```
 
-# Code formatting
-black src/
-ruff check src/
+**`rollback`** - Revert from tryboot to previous partition
 
-# Type checking
-mypy src/
+```bash
+sudo tsupdate rollback           # Rollback configuration
+sudo tsupdate rollback --reboot  # Rollback and reboot
+```
+
+### Updates
+
+**`check`** - Check GitHub releases for available updates
+
+```bash
+tsupdate check                                    # Check for updates
+tsupdate check --pre                              # Include pre-releases
+tsupdate check --max-releases 10                  # Check more releases
+tsupdate check --github-url https://github.com/...  # Custom repository
+```
+
+**`apply`** - Apply incremental update to inactive partition
+
+```bash
+sudo tsupdate apply <url>          # Apply from URL
+sudo tsupdate apply <file>         # Apply from local file
+sudo tsupdate apply <url> -k       # Keep downloaded file
+```
+
+**`restore`** - Restore OS image to inactive partition
+
+```bash
+sudo tsupdate restore <url>        # Restore from URL
+sudo tsupdate restore <file>       # Restore from local file
+sudo tsupdate restore <url> -p 3   # Use partition 3 from image
+sudo tsupdate restore <url> -k     # Keep downloaded image
+```
+
+### Partition Operations
+
+**`syncroot`** - Sync active partition to inactive partition
+
+```bash
+sudo tsupdate syncroot   # Clone current system to inactive partition
+```
+
+**`mount`** - Mount inactive partition to `/media/root-up`
+
+```bash
+sudo tsupdate mount   # Mount for manual access
+```
+
+**`unmount`** - Unmount inactive partition
+
+```bash
+sudo tsupdate unmount   # Unmount after manual access
+```
+
+## Typical Workflows
+
+### Incremental Update
+
+```bash
+# 1. Check for updates
+tsupdate check
+
+# 2. Apply incremental update
+sudo tsupdate apply https://github.com/.../update-2025.12.1-to-2025.12.2.tar
+
+# 3. Reboot to test (automatic)
+
+# 4. Persist if working correctly
+sudo tsupdate persist
+
+# Or rollback if issues found
+sudo tsupdate rollback
+```
+
+### Full Image Restore
+
+```bash
+# 1. Check for latest release
+tsupdate check
+
+# 2. Restore OS image
+sudo tsupdate restore https://github.com/.../tsos-2025.12.2.img.gz
+
+# 3. Reboot to test (automatic)
+
+# 4. Persist or rollback
+sudo tsupdate persist
+```
+
+### Manual Partition Inspection
+
+```bash
+# Mount inactive partition
+sudo tsupdate mount
+
+# Inspect or modify files
+ls /media/root-up
+sudo nano /media/root-up/etc/config
+
+# Unmount when done
+sudo tsupdate unmount
+```
+
+## Creating Updates
+
+Incremental update files (rsync batch files) can be created using [pimod's pidiff tool](https://github.com/nature40/pimod):
+
+```bash
+# Compare two images and create an incremental update
+pidiff --tar base.img updated.img
+
+# This creates a tar archive containing the rsync batch file
+# which can be applied using: tsupdate apply update.tar
+```
+
+## GitHub Authentication
+
+For private repositories, set `GH_TOKEN` environment variable or use GitHub CLI:
+
+```bash
+# Using environment variable
+export GH_TOKEN="ghp_..."
+
+# Or authenticate with GitHub CLI
+gh auth login
+
+# Commands now work with private repositories
+tsupdate check
+sudo tsupdate apply https://github.com/private-org/repo/releases/download/...
 ```
 
 ## Requirements
 
 - Python 3.11+
-- Raspberry Pi with tryboot support (Raspberry Pi 4, 400, CM4, Pi 5)
-- Two root partitions (A/B layout) - mmcblk0p2 (rootfs) and mmcblk0p3 (clonefs)
+- Raspberry Pi with tryboot support (Pi 4, 400, CM4, Pi 5)
+- A/B partition layout - mmcblk0p2 (rootfs) and mmcblk0p3 (clonefs)
+- Root privileges for most operations
 
-## Dependencies
+## Documentation
 
-Currently, tsupdate uses only Python standard library modules:
-- `argparse` - CLI argument parsing
-- `json` - JSON output formatting
-- `pathlib` - Path handling
-- `subprocess` - System command execution
-- `re` - Regular expressions
-- `typing` - Type hints
+Detailed documentation for each module is available in the `docs/` directory:
 
-No external dependencies are required.
+- **[status.md](docs/status.md)** - System status and partition detection
+- **[tryboot.md](docs/tryboot.md)** - Tryboot configuration and management
+- **[syncroot.md](docs/syncroot.md)** - Partition mounting and syncing
+- **[apply.md](docs/apply.md)** - Incremental update application
+- **[restore.md](docs/restore.md)** - OS image restoration
+- **[github.md](docs/github.md)** - GitHub API integration
+- **[utils.md](docs/utils.md)** - File download and caching utilities
 
-## Architecture Notes
+## Version Scheme
 
-### Partition Detection
+tsupdate uses time-based versioning: `YEAR.MONTH.COUNT`
 
-The tool detects the currently active partition by parsing `/proc/cmdline`:
-
-```python
-# Example: root=/dev/mmcblk0p2 → active partition is p2
-# Inactive partition will be p3
-```
-
-Partition labels are read using `lsblk` or `blkid` to identify rootfs vs clonefs.
-
-### Tryboot Detection
-
-Tryboot status is detected by reading the device tree node:
-
-```
-/sys/firmware/devicetree/base/chosen/bootloader/tryboot
-```
-
-A non-zero value indicates the system was booted via tryboot.
-
-### Tryboot Configuration
-
-The `tryboot` command configures the system to boot from the alternate partition on the next reboot:
-
-1. Reads the current `cmdline.txt` from `/boot/firmware/`
-2. Creates `tryline.txt` with the partition switched (rootfs ↔ clonefs)
-3. Copies `config.txt` to `tryboot.txt`
-4. Adds `cmdline=tryline.txt` entry to `tryboot.txt`
-
-On reboot with `reboot "0 tryboot"`, the system will boot from the alternate partition.
-
-### Boot Configuration Persistence
-
-The `persist` command makes the current tryboot configuration permanent:
-
-1. Reads `tryline.txt` from `/boot/firmware/`
-2. Writes it back to `cmdline.txt`
-
-This ensures that after a successful tryboot, the new partition becomes the default boot partition.
-
-### OS Release Parsing
-
-The tool reads `/etc/os-release` from the booted system and extracts:
-- OS name and pretty name
-- Version information (VERSION_ID, VERSION_COMMIT)
-- Support URLs and other metadata
-
-## References
-
-- [Raspberry Pi Tryboot](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#fail-safe-os-updates-tryboot) - Hardware boot failsafe mechanism
+Examples: `2025.12.1`, `2025.12.2`, `2026.01.1`
 
 ## Authors
 
 Jonas Höchst <hoechst@trackit.systems>
+
+## Links
+
+- [Raspberry Pi Tryboot Documentation](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#fail-safe-os-updates-tryboot)
+- [pimod - Tool for creating Raspberry Pi images and incremental updates](https://github.com/nature40/pimod)
