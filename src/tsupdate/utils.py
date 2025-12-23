@@ -145,17 +145,22 @@ def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Opt
         # Extract asset name from original URL before resolving
         # Format: https://github.com/owner/repo/releases/download/tag/asset-name
         if "/releases/download/" in source:
+            # Direct download URL - use it directly without resolving
+            # This works for public repos and avoids API calls
             asset_name = source.split("/releases/download/")[1].split("/", 1)[-1]
+            logger.debug(f"Using direct GitHub download URL: {source}")
             logger.debug(f"Extracted asset name from URL: {asset_name}")
-        
-        # Use GitHub API to resolve the URL (supports private repos with token from env)
-        resolved_url = resolve_github_release_url(source)
-        if resolved_url:
-            download_url = resolved_url
-            logger.debug(f"Resolved GitHub release URL to: {download_url}")
+            download_url = source  # Use original URL directly
         else:
-            logger.error(f"Failed to resolve GitHub release URL: {source}")
-            return (None, False)
+            # Tag URL or other format - resolve via API
+            # Use GitHub API to resolve the URL (supports private repos with token from env)
+            resolved_url = resolve_github_release_url(source)
+            if resolved_url:
+                download_url = resolved_url
+                logger.debug(f"Resolved GitHub release URL to: {download_url}")
+            else:
+                logger.error(f"Failed to resolve GitHub release URL: {source}")
+                return (None, False)
     
     # URL - check if already downloaded, otherwise download
     # Determine file name - prefer asset name from GitHub URL, then from download URL

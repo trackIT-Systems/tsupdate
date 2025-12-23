@@ -297,15 +297,25 @@ def resolve_github_release_url(url: str) -> Optional[str]:
             assets = _get_assets_from_release(release)
             for asset_info in assets:
                 if asset_info['name'] == asset_name:
-                    # Use authenticated API endpoint if asset_id is available
-                    if 'id' in asset_info:
+                    # Prefer browser_download_url (works for public repos, simpler)
+                    # Only use API endpoint if we have a token (for private repos)
+                    github_token = get_github_token()
+                    if github_token and 'id' in asset_info:
+                        # For private repos with auth, use API endpoint
                         api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_info['id']}"
-                        logger.debug(f"Found asset: {asset_name} -> API endpoint: {api_url}")
+                        logger.debug(f"Found asset: {asset_name} -> API endpoint (authenticated): {api_url}")
                         return api_url
                     else:
-                        # Fallback to browser_download_url
-                        logger.debug(f"Found asset (no asset_id): {asset_name} -> {asset_info['url']}")
-                        return asset_info['url']
+                        # For public repos or when no token, use browser_download_url
+                        browser_url = asset_info.get('url', '')
+                        if browser_url:
+                            logger.debug(f"Found asset: {asset_name} -> browser_download_url: {browser_url}")
+                            return browser_url
+                        elif 'id' in asset_info:
+                            # Fallback to API endpoint if browser_url not available
+                            api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_info['id']}"
+                            logger.debug(f"Found asset: {asset_name} -> API endpoint (fallback): {api_url}")
+                            return api_url
             
             logger.error(f"Asset '{asset_name}' not found in release '{tag}'")
             return None
