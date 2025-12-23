@@ -1,0 +1,40 @@
+# tsupdate daemon configuration
+#
+# This file configures the tsupdated daemon that automatically checks for
+# and applies system updates using the tryboot mechanism for safe rollback.
+#
+# Copy this file to /boot/firmware/tsupdate.yml to enable automatic updates.
+
+# How often to check for updates (in seconds)
+# Default: 3600 (1 hour)
+check_interval: 3600
+
+# Include pre-releases when checking for updates
+# Set to true to receive beta/pre-release updates
+# Default: false
+include_prereleases: false
+
+# Optional: Override GitHub repository URL
+# If not set, uses SUPPORT_URL from /etc/os-release
+# Useful for testing with a different repository
+# github_url: "https://github.com/owner/repo"
+
+# Maximum number of recent releases to check for batch updates
+# The daemon will search through this many recent releases to find
+# an applicable update for the current version
+# Default: 5
+max_releases: 5
+
+# System uptime threshold before persisting tryboot configuration (in seconds)
+# When the daemon starts after a tryboot reboot, it waits until system uptime
+# reaches this threshold before persisting the boot configuration.
+# This allows time to verify the update worked, regardless of when the daemon starts.
+# Default: 600 (10 minutes of uptime)
+persist_timeout: 600
+
+# Countdown before initiating tryboot reboot after update (in seconds)
+# After successfully applying an update, the daemon notifies users and waits
+# this long before rebooting. Users can cancel by sending SIGTERM to the daemon.
+# Default: 60 (1 minute)
+update_countdown: 60
+

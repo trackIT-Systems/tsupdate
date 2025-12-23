@@ -24,6 +24,7 @@ classifiers = [
 
 dependencies = [
     "PyGithub>=2.0.0",
+    "PyYAML>=6.0.0",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +38,7 @@ dev = [
 
 [project.scripts]
 tsupdate = "tsupdate.cli:main"
+tsupdated = "tsupdate.cli_daemon:main"
 
 [project.urls]
 Homepage = "https://github.com/trackit-systems/tsupdate"

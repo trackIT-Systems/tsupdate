@@ -16,6 +16,7 @@ Update daemon for tsOS-based Raspberry Pi devices with A/B partition management 
 - **GitHub integration** - Check for available updates from GitHub releases
 - **Partition operations** - Mount, unmount, and sync partitions
 - **Boot management** - Configure, persist, and rollback boot configurations
+- **Automatic updates** - Background daemon for unattended update management
 
 ## Installation
 
@@ -157,6 +158,61 @@ sudo nano /media/root-up/etc/config
 sudo tsupdate unmount
 ```
 
+## Automatic Updates (Daemon)
+
+The `tsupdated` daemon provides automatic background update management:
+
+### Installation
+
+```bash
+# Copy example configuration
+sudo cp tsupdate.example.yml /boot/firmware/tsupdate.yml
+
+# Install systemd service
+sudo cp tsupdated.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now tsupdated
+```
+
+### Configuration
+
+Edit `/boot/firmware/tsupdate.yml`:
+
+```yaml
+# Check for updates every hour
+check_interval: 3600
+
+# Include pre-releases
+include_prereleases: false
+
+# Wait 10 minutes before persisting after tryboot
+persist_timeout: 600
+
+# Give users 1 minute to cancel before reboot
+update_countdown: 60
+```
+
+### Monitoring
+
+```bash
+# Check daemon status
+sudo systemctl status tsupdated
+
+# View logs
+sudo journalctl -u tsupdated -f
+```
+
+### Cancelling Updates
+
+During the countdown before reboot, cancel with:
+
+```bash
+# Send termination signal
+sudo systemctl restart tsupdated
+```
+
+See **[daemon.md](docs/daemon.md)** for complete documentation.
+
 ## Creating Updates
 
 Incremental update files (rsync batch files) can be created using [pimod's pidiff tool](https://github.com/nature40/pimod):
@@ -196,6 +252,7 @@ sudo tsupdate apply https://github.com/private-org/repo/releases/download/...
 
 Detailed documentation for each module is available in the `docs/` directory:
 
+- **[daemon.md](docs/daemon.md)** - Automatic update daemon
 - **[status.md](docs/status.md)** - System status and partition detection
 - **[tryboot.md](docs/tryboot.md)** - Tryboot configuration and management
 - **[syncroot.md](docs/syncroot.md)** - Partition mounting and syncing
