@@ -216,6 +216,28 @@ def read_tryline_file() -> Optional[str]:
         return None
 
 
+def is_tryboot_persisted() -> bool:
+    """
+    Check if tryboot configuration is persisted by comparing tryline.txt and cmdline.txt.
+    
+    Returns:
+        True if tryboot is persisted (files match), False otherwise
+    """
+    if not TRYLINE_FILE.exists() or not CMDLINE_FILE.exists():
+        return False
+    
+    try:
+        with open(TRYLINE_FILE, "r", encoding="utf-8") as f:
+            tryline_content = f.read().strip()
+        
+        with open(CMDLINE_FILE, "r", encoding="utf-8") as f:
+            cmdline_content = f.read().strip()
+        
+        return tryline_content == cmdline_content
+    except (OSError, IOError):
+        return False
+
+
 def persist_boot_configuration() -> bool:
     """
     Persist the current boot configuration by copying tryline.txt to cmdline.txt.
@@ -394,9 +416,13 @@ def execute_tryboot(reboot: bool = False) -> int:
     """
     # Check if already trybooted
     if not is_regular_boot():
-        logger.error("System is already booted via tryboot.")
-        logger.error("The config needs to be persisted before doing another tryboot.")
-        return 1
+        # Allow another tryboot if config has been persisted
+        if is_tryboot_persisted():
+            logger.info("System is booted via tryboot, but config is persisted. Allowing another tryboot.")
+        else:
+            logger.error("System is already booted via tryboot.")
+            logger.error("The config needs to be persisted before doing another tryboot.")
+            return 1
     
     # Get current and target partitions
     current_partition = get_current_root_partition()

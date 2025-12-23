@@ -1,6 +1,7 @@
 """tsupdate - Update daemon for tsOS-based devices."""
 
 import logging
+import os
 import sys
 
 from tsupdate.status import read_booted_os_release
@@ -52,3 +53,13 @@ def configure_logging(verbose: bool = False) -> None:
     
     handler.setFormatter(formatter)
     root_logger.addHandler(handler)
+
+
+def is_root() -> bool:
+    """
+    Check if the current process is running as root.
+    
+    Returns:
+        True if running as root (effective UID is 0), False otherwise
+    """
+    return os.geteuid() == 0

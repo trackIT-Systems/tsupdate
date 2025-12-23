@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from tsupdate.status import get_inactive_partition
-from tsupdate.tryboot import is_regular_boot, BOOT_DIR, CMDLINE_FILE, TRYLINE_FILE
+from tsupdate.tryboot import is_regular_boot, is_tryboot_persisted
 
 logger = logging.getLogger(__name__)
 
@@ -15,28 +15,6 @@ logger = logging.getLogger(__name__)
 # Mount points
 ROOT_RO = Path("/media/root-ro")
 ROOT_UP = Path("/media/root-up")
-
-
-def is_tryboot_persisted() -> bool:
-    """
-    Check if tryboot configuration is persisted by comparing tryline.txt and cmdline.txt.
-    
-    Returns:
-        True if tryboot is persisted (files match), False otherwise
-    """
-    if not TRYLINE_FILE.exists() or not CMDLINE_FILE.exists():
-        return False
-    
-    try:
-        with open(TRYLINE_FILE, "r", encoding="utf-8") as f:
-            tryline_content = f.read().strip()
-        
-        with open(CMDLINE_FILE, "r", encoding="utf-8") as f:
-            cmdline_content = f.read().strip()
-        
-        return tryline_content == cmdline_content
-    except (OSError, IOError):
-        return False
 
 
 def can_run_syncroot() -> bool:
@@ -128,20 +106,29 @@ def unmount_partition(mount_point: Path) -> bool:
         return False
 
 
-def sync_root_partitions() -> bool:
+def sync_root_partitions(source: Optional[Path] = None, destination: Optional[Path] = None) -> bool:
     """
     Sync root partitions using rsync.
     
-    Syncs /media/root-ro to /media/root-up using rsync with archive mode
+    Syncs source to destination using rsync with archive mode
     and deletion of extra files.
+    
+    Args:
+        source: Source path to sync from (defaults to ROOT_RO)
+        destination: Destination path to sync to (defaults to ROOT_UP)
     
     Returns:
         True if successful, False otherwise
     """
-    source = str(ROOT_RO) + "/"
-    destination = str(ROOT_UP) + "/"
+    if source is None:
+        source = ROOT_RO
+    if destination is None:
+        destination = ROOT_UP
     
-    logger.debug(f"Syncing from {source} to {destination}")
+    source_str = str(source) + "/"
+    destination_str = str(destination) + "/"
+    
+    logger.debug(f"Syncing from {source_str} to {destination_str}")
     
     # Build rsync command
     rsync_cmd = ["rsync", "-a", "-h", "--stats", "--delete"]
@@ -150,7 +137,7 @@ def sync_root_partitions() -> bool:
     if logger.isEnabledFor(logging.DEBUG):
         rsync_cmd.append("--itemize-changes")
     
-    rsync_cmd.extend([source, destination])
+    rsync_cmd.extend([source_str, destination_str])
     
     try:
         result = subprocess.run(

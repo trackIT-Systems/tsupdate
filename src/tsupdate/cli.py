@@ -2,13 +2,14 @@
 
 import argparse
 import sys
-from tsupdate import __version__, configure_logging
+from tsupdate import __version__, configure_logging, is_root
 from pathlib import Path
 
 from tsupdate.status import get_system_status, format_status_text, format_status_json
 from tsupdate.tryboot import execute_tryboot, execute_persist, rollback_tryboot
 from tsupdate.syncroot import execute_syncroot, execute_mount, execute_unmount
 from tsupdate.apply import execute_apply
+from tsupdate.restore import execute_restore
 
 
 def main():
@@ -182,6 +183,42 @@ def main():
         help="Path to update tar archive file",
     )
     
+    # restore command
+    parser_restore = subparsers.add_parser(
+        "restore",
+        help="Restore OS image to inactive partition",
+        description=(
+            "Download and restore an OS image to the inactive partition.\n\n"
+            "This command:\n"
+            "  - Downloads the OS image from URL (or uses local file)\n"
+            "  - Extracts the image if compressed (.gz, .xz, .zip)\n"
+            "  - For .zip files, uses the largest .img file\n"
+            "  - Mounts the rootfs partition via loopback\n"
+            "  - Syncs the filesystem to the inactive partition\n"
+            "  - Cleans up temporary files and mounts\n\n"
+            "Can only be run when booted regularly or when tryboot is persisted."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser_restore.add_argument(
+        "image_source",
+        type=str,
+        help="URL or local file path to OS image",
+    )
+    parser_restore.add_argument(
+        "--partition",
+        "-p",
+        type=int,
+        default=2,
+        help="Partition number in image to use as rootfs (default: 2)",
+    )
+    parser_restore.add_argument(
+        "--keep-image",
+        "-k",
+        action="store_true",
+        help="Keep downloaded image file after restore",
+    )
+    
     # Parse arguments
     args = parser.parse_args()
     
@@ -192,6 +229,15 @@ def main():
     if not args.command:
         parser.print_help()
         sys.exit(0)
+    
+    # Commands that require root privileges
+    privileged_commands = {"syncroot", "mount", "unmount", "apply", "restore", "tryboot", "persist", "rollback"}
+    
+    # Check if root is required for the requested command
+    if args.command in privileged_commands:
+        if not is_root():
+            print("ERROR: This command requires root privileges. Please run as root or use sudo.", file=sys.stderr)
+            sys.exit(1)
     
     # Handle status command
     if args.command == "status":
@@ -235,6 +281,15 @@ def main():
     # Handle apply command
     if args.command == "apply":
         exit_code = execute_apply(args.update_file)
+        sys.exit(exit_code)
+    
+    # Handle restore command
+    if args.command == "restore":
+        exit_code = execute_restore(
+            image_source=args.image_source,
+            partition=args.partition,
+            keep_image=args.keep_image,
+        )
         sys.exit(exit_code)
     
     # This should not be reached if argparse is working correctly
