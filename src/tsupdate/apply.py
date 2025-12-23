@@ -15,11 +15,10 @@ from tsupdate.status import read_os_release
 from tsupdate.syncroot import (
     can_run_syncroot,
     get_inactive_partition_device,
-    mount_partition,
-    unmount_partition,
+    mount_context,
     ROOT_UP,
 )
-from tsupdate.utils import ARTIFACTS_DIR, ensure_file
+from tsupdate.utils import ARTIFACTS_DIR, ensure_file, safe_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -193,76 +192,6 @@ def extract_rsync_command_from_batch_sh(batch_sh_path: Path) -> Optional[Tuple[L
         return None
 
 
-def extract_filter_rules_from_batch_sh(batch_sh_path: Path) -> Optional[str]:
-    """
-    Extract filter rules from batch.sh file (from heredoc after rsync command).
-    
-    Args:
-        batch_sh_path: Path to batch.sh file
-        
-    Returns:
-        Filter rules as string (with newlines), or None on error
-    """
-    if not batch_sh_path.exists():
-        logger.error(f"batch.sh not found: {batch_sh_path}")
-        return None
-    
-    try:
-        with open(batch_sh_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        
-        # Find the rsync command line (contains --read-batch)
-        rsync_line_idx = None
-        for i, line in enumerate(lines):
-            if "--read-batch" in line and "rsync" in line:
-                rsync_line_idx = i
-                break
-        
-        if rsync_line_idx is None:
-            logger.warning("Could not find rsync command in batch.sh, using default filter rules")
-            return None
-        
-        # Look for heredoc marker after rsync command
-        # Pattern: <<'MARKER' or <<MARKER
-        heredoc_marker = None
-        rsync_line = lines[rsync_line_idx]
-        
-        # Match heredoc pattern: <<'MARKER' or <<MARKER
-        heredoc_match = re.search(r'<<[\'"]?([^\'"\s]+)[\'"]?', rsync_line)
-        if heredoc_match:
-            heredoc_marker = heredoc_match.group(1)
-            logger.debug(f"Found heredoc marker: {heredoc_marker}")
-        else:
-            logger.warning("Could not find heredoc marker in rsync command, using default filter rules")
-            return None
-        
-        # Extract lines between heredoc start and end marker
-        filter_rules = []
-        
-        for i in range(rsync_line_idx + 1, len(lines)):
-            line = lines[i]
-            stripped = line.strip()
-            
-            # Check if this is the end marker
-            if stripped == heredoc_marker:
-                break
-            
-            # Collect filter rule lines (preserve original line including leading/trailing whitespace)
-            filter_rules.append(line.rstrip('\n\r'))
-        
-        if not filter_rules:
-            logger.warning("No filter rules found in heredoc, using default filter rules")
-            return None
-        
-        filter_rules_str = '\n'.join(filter_rules) + '\n'
-        logger.debug(f"Extracted filter rules from batch.sh:\n{filter_rules_str}")
-        return filter_rules_str
-        
-    except (OSError, IOError, UnicodeDecodeError) as e:
-        logger.error(f"Could not extract filter rules from batch.sh: {e}")
-        return None
-
-
 def find_rsync_batch_file(extracted_dir: Path, update_filename: str) -> Optional[Path]:
     """
     Find rsync batch file in extracted archive.
@@ -371,26 +300,20 @@ def apply_rsync_batch(batch_file: Path, target_dir: Path, rsync_options: List[st
     has_filter_option = any(opt.startswith('--filter') for opt in rsync_options)
     
     # Process rsync options: add --stats if not present, handle --itemize-changes based on verbose mode
-    processed_options = rsync_options.copy()
+    is_verbose = logger.isEnabledFor(logging.DEBUG)
+    
+    # Start with base options, removing --itemize-changes if present
+    processed_options = [opt for opt in rsync_options if opt != '--itemize-changes']
     
     # Add --stats if not already present
-    has_stats = any(opt == '--stats' or opt.startswith('--stats=') for opt in processed_options)
-    if not has_stats:
+    if not any(opt == '--stats' or opt.startswith('--stats=') for opt in processed_options):
         processed_options.append('--stats')
         logger.debug("Added --stats option to rsync command")
     
-    # Handle --itemize-changes based on verbose mode
-    has_itemize_changes = any(opt == '--itemize-changes' for opt in processed_options)
-    is_verbose = logger.isEnabledFor(logging.DEBUG)
-    
+    # Add --itemize-changes only in verbose mode
     if is_verbose:
-        if not has_itemize_changes:
-            processed_options.append('--itemize-changes')
-            logger.debug("Added --itemize-changes option (verbose mode)")
-    else:
-        if has_itemize_changes:
-            processed_options = [opt for opt in processed_options if opt != '--itemize-changes']
-            logger.debug("Removed --itemize-changes option (non-verbose mode)")
+        processed_options.append('--itemize-changes')
+        logger.debug("Added --itemize-changes option (verbose mode)")
     
     # Build rsync command with processed options from batch.sh
     rsync_cmd = ["rsync"] + processed_options + [f"--read-batch={batch_file}", str(target_dir)]
@@ -530,96 +453,87 @@ def execute_apply(update_source: str, keep_download: bool = False) -> int:
             logger.error("BASE_PRETTY_NAME not found in batch.sh metadata")
             return 1
         
-        logger.info("pidiff update script")
-        logger.info("===================")
         logger.info(f"Base image: {base_image} ({base_pretty_name})")
         logger.info(f"Updated image: {updated_image} ({updated_pretty_name})")
         
-        # Mount inactive partition
+        # Mount inactive partition and apply update
         logger.debug(f"Mounting {device} to {ROOT_UP}")
-        if not mount_partition(device, ROOT_UP):
-            logger.error(f"Failed to mount {device} to {ROOT_UP}")
-            return 1
-        
-        logger.info(f"Mounted {device} to {ROOT_UP}")
-        logger.debug(f"Verifying mount point: {ROOT_UP}")
-        logger.debug(f"Mount point exists: {ROOT_UP.exists()}")
-        logger.debug(f"Mount point is directory: {ROOT_UP.is_dir()}")
-        
-        mounted = True
         try:
-            # Check version compatibility
-            target_os_release = ROOT_UP / "etc" / "os-release"
-            logger.debug(f"Checking version compatibility with: {target_os_release}")
-            is_compatible, found_pretty_name = check_version_compatibility(base_pretty_name, target_os_release)
-            logger.debug(f"Version compatibility check result: compatible={is_compatible}, found_pretty_name={found_pretty_name}")
-            
-            if not is_compatible:
-                logger.error("Version mismatch")
-                logger.error(f"  Expected base version: {base_pretty_name}")
-                logger.error(f"  Found target version: {found_pretty_name}")
-                logger.error(f"  This update is designed for base version {base_pretty_name}")
-                return 1
-            
-            # Extract rsync command and filter rules from batch.sh
-            logger.debug("Extracting rsync command and filter rules from batch.sh")
-            rsync_config = extract_rsync_command_from_batch_sh(batch_sh)
-            if rsync_config is None:
-                logger.error("Could not extract rsync command from batch.sh")
-                return 1
-            
-            rsync_options, filter_rules = rsync_config
-            
-            if not rsync_options:
-                logger.error("No rsync options found in batch.sh")
-                return 1
-            
-            # Find rsync batch file
-            logger.debug(f"Looking for rsync batch file in extracted directory: {extracted_dir}")
-            # Use original source filename for finding batch file
-            source_filename = Path(update_source).name
-            batch_file = find_rsync_batch_file(extracted_dir, source_filename)
-            if not batch_file:
-                logger.error("Could not find rsync batch file in update archive")
-                logger.debug(f"Contents of extracted directory: {list(extracted_dir.iterdir())}")
-                return 1
-            
-            logger.info(f"Found rsync batch file: {batch_file}")
-            logger.debug(f"Batch file absolute path: {batch_file.resolve()}")
-            
-            # Verify target mount point
-            logger.debug(f"Verifying target mount point: {ROOT_UP}")
-            if not ROOT_UP.exists():
-                logger.error(f"Target mount point does not exist: {ROOT_UP}")
-                return 1
-            
-            logger.debug(f"Target mount point exists: {ROOT_UP}")
-            
-            logger.info(f"Applying update to: {ROOT_UP}")
-            logger.info("This will modify files in the target directory.")
-            logger.debug(f"About to call apply_rsync_batch with batch_file={batch_file}, target_dir={ROOT_UP}")
-            
-            # Apply rsync batch
-            exit_code = apply_rsync_batch(batch_file, ROOT_UP, rsync_options, filter_rules)
-            
-            logger.debug(f"apply_rsync_batch returned with exit code: {exit_code}")
-            
-            message = handle_rsync_exit_code(exit_code)
-            if exit_code == 0:
-                logger.info(message)
-            elif exit_code in (23, 24):
-                logger.warning(message)
-            else:
-                logger.error(message)
-                return exit_code
-            
-            return 0
-        finally:
-            # Always unmount after applying
-            if mounted:
-                unmount_success = unmount_partition(ROOT_UP)
-                if not unmount_success:
-                    logger.warning(f"Could not unmount {ROOT_UP}")
+            with mount_context(device, ROOT_UP) as mount_point:
+                logger.info(f"Mounted {device} to {mount_point}")
+                logger.debug(f"Verifying mount point: {mount_point}")
+                logger.debug(f"Mount point exists: {mount_point.exists()}")
+                logger.debug(f"Mount point is directory: {mount_point.is_dir()}")
+                
+                # Check version compatibility
+                target_os_release = mount_point / "etc" / "os-release"
+                logger.debug(f"Checking version compatibility with: {target_os_release}")
+                is_compatible, found_pretty_name = check_version_compatibility(base_pretty_name, target_os_release)
+                logger.debug(f"Version compatibility check result: compatible={is_compatible}, found_pretty_name={found_pretty_name}")
+                
+                if not is_compatible:
+                    logger.error("Version mismatch")
+                    logger.error(f"  Expected base version: {base_pretty_name}")
+                    logger.error(f"  Found target version: {found_pretty_name}")
+                    logger.error(f"  This update is designed for base version {base_pretty_name}")
+                    return 1
+                
+                # Extract rsync command and filter rules from batch.sh
+                logger.debug("Extracting rsync command and filter rules from batch.sh")
+                rsync_config = extract_rsync_command_from_batch_sh(batch_sh)
+                if rsync_config is None:
+                    logger.error("Could not extract rsync command from batch.sh")
+                    return 1
+                
+                rsync_options, filter_rules = rsync_config
+                
+                if not rsync_options:
+                    logger.error("No rsync options found in batch.sh")
+                    return 1
+                
+                # Find rsync batch file
+                logger.debug(f"Looking for rsync batch file in extracted directory: {extracted_dir}")
+                # Use original source filename for finding batch file
+                source_filename = Path(update_source).name
+                batch_file = find_rsync_batch_file(extracted_dir, source_filename)
+                if not batch_file:
+                    logger.error("Could not find rsync batch file in update archive")
+                    logger.debug(f"Contents of extracted directory: {list(extracted_dir.iterdir())}")
+                    return 1
+                
+                logger.info(f"Found rsync batch file: {batch_file}")
+                logger.debug(f"Batch file absolute path: {batch_file.resolve()}")
+                
+                # Verify target mount point
+                logger.debug(f"Verifying target mount point: {mount_point}")
+                if not mount_point.exists():
+                    logger.error(f"Target mount point does not exist: {mount_point}")
+                    return 1
+                
+                logger.debug(f"Target mount point exists: {mount_point}")
+                
+                logger.info(f"Applying update to: {mount_point}")
+                logger.info("This will modify files in the target directory.")
+                logger.debug(f"About to call apply_rsync_batch with batch_file={batch_file}, target_dir={mount_point}")
+                
+                # Apply rsync batch
+                exit_code = apply_rsync_batch(batch_file, mount_point, rsync_options, filter_rules)
+                
+                logger.debug(f"apply_rsync_batch returned with exit code: {exit_code}")
+                
+                message = handle_rsync_exit_code(exit_code)
+                if exit_code == 0:
+                    logger.info(message)
+                elif exit_code in (23, 24):
+                    logger.warning(message)
+                else:
+                    logger.error(message)
+                    return exit_code
+                
+                return 0
+        except RuntimeError as e:
+            logger.error(str(e))
+            return 1
     finally:
         # Cleanup temporary directory
         if temp_dir_cleanup and extracted_dir:
@@ -630,13 +544,8 @@ def execute_apply(update_source: str, keep_download: bool = False) -> int:
                 logger.warning(f"Could not remove temporary directory {extracted_dir}: {e}")
         
         # Cleanup: remove downloaded file unless keep_download is set or it's a local file
-        if not keep_download and not is_local_file:
-            try:
-                if update_file_path and update_file_path.exists():
-                    update_file_path.unlink()
-                    logger.debug(f"Removed downloaded file: {update_file_path}")
-            except OSError as e:
-                logger.warning(f"Could not remove downloaded file: {e}")
+        if not keep_download and not is_local_file and update_file_path:
+            safe_cleanup(update_file_path)
         elif is_local_file:
             logger.debug("Using local file, no cleanup needed")
         else:

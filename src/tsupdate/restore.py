@@ -14,12 +14,11 @@ from typing import Optional
 from tsupdate.syncroot import (
     can_run_syncroot,
     get_inactive_partition_device,
-    mount_partition,
-    unmount_partition,
+    mount_context,
     ROOT_UP,
     sync_root_partitions,
 )
-from tsupdate.utils import ARTIFACTS_DIR, ensure_file
+from tsupdate.utils import ARTIFACTS_DIR, ensure_file, safe_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -158,12 +157,7 @@ def extract_image(compressed_path: Path, output_path: Path) -> bool:
     except Exception as e:
         logger.error(f"Failed to extract image: {e}")
         # Clean up temporary file on failure
-        try:
-            if temp_path.exists():
-                temp_path.unlink()
-                logger.debug(f"Removed temporary extraction file: {temp_path}")
-        except OSError:
-            pass  # Ignore cleanup errors
+        safe_cleanup(temp_path)
         return False
 
 
@@ -342,12 +336,7 @@ def execute_restore(
             
             # Clean up any leftover temporary files from interrupted extractions
             temp_extracted_path = extracted_path.with_suffix(extracted_path.suffix + ".tmp")
-            if temp_extracted_path.exists():
-                try:
-                    temp_extracted_path.unlink()
-                    logger.debug(f"Removed leftover temporary extraction file: {temp_extracted_path}")
-                except OSError:
-                    pass  # Ignore cleanup errors
+            safe_cleanup(temp_extracted_path)
             
             # Check if extracted .img file already exists
             if extracted_path.exists() and extracted_path.is_file():
@@ -395,53 +384,38 @@ def execute_restore(
         
         logger.info(f"Using partition {partition} from image: {partition_device}")
         
-        # Mount image partition
-        if not mount_partition(partition_device, IMAGE_MOUNT):
+        # Mount image partition and inactive partition, then sync
+        try:
+            with mount_context(partition_device, IMAGE_MOUNT) as image_mount:
+                logger.info(f"Mounted {partition_device} to {image_mount}")
+                
+                with mount_context(device, ROOT_UP) as target_mount:
+                    logger.info(f"Mounted {device} to {target_mount}")
+                    
+                    # Sync from image to inactive partition
+                    logger.info(f"Syncing {image_mount} to {target_mount}...")
+                    
+                    sync_success = sync_root_partitions(source=image_mount, destination=target_mount)
+                    if sync_success:
+                        logger.info("Sync completed successfully")
+                    
+                    return 0 if sync_success else 1
+        except RuntimeError as e:
+            logger.error(str(e))
             return 1
-        
-        image_mounted = True
-        logger.info(f"Mounted {partition_device} to {IMAGE_MOUNT}")
-        
-        # Mount inactive partition
-        if not mount_partition(device, ROOT_UP):
-            return 1
-        
-        target_mounted = True
-        logger.info(f"Mounted {device} to {ROOT_UP}")
-        
-        # Sync from image to inactive partition
-        logger.info(f"Syncing {IMAGE_MOUNT} to {ROOT_UP}...")
-        
-        sync_success = sync_root_partitions(source=IMAGE_MOUNT, destination=ROOT_UP)
-        if sync_success:
-            logger.info("Sync completed successfully")
-        
-        return 0 if sync_success else 1
         
     finally:
-        # Cleanup: unmount in reverse order
-        if target_mounted:
-            unmount_partition(ROOT_UP)
-        
-        if image_mounted:
-            unmount_partition(IMAGE_MOUNT)
         
         if loop_device:
             remove_loopback(loop_device)
         
         # Cleanup: remove downloaded/extracted files unless keep_image is set or it's a local file
         if not keep_image and not is_local_file:
-            try:
-                if downloaded_path and downloaded_path.exists():
-                    downloaded_path.unlink()
-                    logger.debug(f"Removed downloaded file: {downloaded_path}")
-                
-                # Remove extracted image if it's different from downloaded
-                if image_path and image_path != downloaded_path and image_path.exists():
-                    image_path.unlink()
-                    logger.debug(f"Removed extracted image: {image_path}")
-            except OSError as e:
-                logger.warning(f"Could not remove image files: {e}")
+            if downloaded_path:
+                safe_cleanup(downloaded_path)
+            # Remove extracted image if it's different from downloaded
+            if image_path and image_path != downloaded_path:
+                safe_cleanup(image_path)
         elif is_local_file:
             logger.debug("Using local file, no cleanup needed")
         else:

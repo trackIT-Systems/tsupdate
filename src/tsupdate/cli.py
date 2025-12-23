@@ -79,10 +79,7 @@ def execute_check(include_prereleases: bool = False, max_releases: int = 5, gith
     # Find applicable batch update
     batch_url = find_applicable_batch_update(releases, version_id, max_releases=max_releases)
     
-    # Print results with formatting
-    print("\nGitHub Releases Check")
-    print("=" * 60)
-    
+    # Print results
     if image_url:
         print(f"✓ Latest Release Image:")
         print(f"  {image_url}")
@@ -97,8 +94,6 @@ def execute_check(include_prereleases: bool = False, max_releases: int = 5, gith
     else:
         print(f"✗ Next Applicable Batch Update: Not found")
         print(f"  (current version: {version_id})")
-    
-    print()
     
     return 0
 

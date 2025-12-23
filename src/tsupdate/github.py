@@ -105,6 +105,109 @@ def parse_github_repo_url(support_url: str) -> Optional[Tuple[str, str]]:
     return None
 
 
+def _create_github_client():
+    """
+    Create and configure a GitHub client instance.
+    
+    Uses module-level GitHub token if available. Validates token by checking rate limit.
+    
+    Returns:
+        Configured Github instance
+    """
+    github_token = get_github_token()
+    if github_token:
+        g = Github(github_token)
+        logger.debug("Using GitHub token for authentication")
+        # Verify token is valid by checking rate limit
+        try:
+            rate_limit = g.get_rate_limit()
+            if hasattr(rate_limit, 'resources') and hasattr(rate_limit.resources, 'core'):
+                logger.debug(f"Rate limit remaining: {rate_limit.resources.core.remaining}/{rate_limit.resources.core.limit}")
+            elif hasattr(rate_limit, 'rate'):
+                logger.debug(f"Rate limit remaining: {rate_limit.rate.remaining}/{rate_limit.rate.limit}")
+            else:
+                logger.debug("Rate limit checked (structure unknown)")
+        except Exception as e:
+            logger.warning(f"Could not verify GitHub token: {e}")
+    else:
+        g = Github()
+        logger.debug("Using unauthenticated GitHub API access")
+    return g
+
+
+def _handle_github_exception(e: GithubException, owner: str, repo: str) -> None:
+    """
+    Handle and log GitHub API exceptions consistently.
+    
+    Args:
+        e: GithubException to handle
+        owner: Repository owner
+        repo: Repository name
+    """
+    if e.status == 404:
+        if get_github_token():
+            logger.error(f"Repository not found or access denied: {owner}/{repo}")
+            logger.error("This may be a private repository. Ensure your token has 'repo' scope permissions.")
+        else:
+            logger.error(f"Repository not found: {owner}/{repo}")
+            logger.error("If this is a private repository, set GH_TOKEN environment variable with a token that has 'repo' scope.")
+    elif e.status == 403:
+        logger.error("GitHub API rate limit exceeded or access forbidden")
+        if get_github_token():
+            logger.error("Check that your token has the necessary permissions (e.g., 'repo' scope for private repos)")
+    else:
+        logger.error(f"GitHub API error: {e.status} {e.data}")
+
+
+def _get_assets_from_release(release) -> List[dict]:
+    """
+    Extract asset information from a release object.
+    
+    Tries to use raw_data first to avoid API calls, falls back to API call if needed.
+    
+    Args:
+        release: Release object from PyGithub
+        
+    Returns:
+        List of asset dictionaries with 'name', 'size', 'url', and optionally 'id'
+    """
+    assets = []
+    
+    # Try to get assets from raw_data (avoids API call)
+    try:
+        if hasattr(release, 'raw_data') and 'assets' in release.raw_data:
+            for asset_data in release.raw_data['assets']:
+                asset_info = {
+                    'name': asset_data.get('name', ''),
+                    'size': asset_data.get('size', 0),
+                    'url': asset_data.get('browser_download_url', '')
+                }
+                # Include asset_id if available
+                if 'id' in asset_data:
+                    asset_info['id'] = asset_data['id']
+                assets.append(asset_info)
+            logger.debug(f"Found {len(assets)} assets from raw_data")
+            return assets
+    except (AttributeError, KeyError, TypeError) as e:
+        logger.debug(f"Could not access raw_data, falling back to API call: {e}")
+    
+    # Fallback: use API call
+    try:
+        for asset in release.get_assets():
+            asset_info = {
+                'name': asset.name,
+                'size': asset.size,
+                'url': asset.browser_download_url,
+                'id': asset.id
+            }
+            assets.append(asset_info)
+        logger.debug(f"Found {len(assets)} assets from API call")
+    except Exception as e:
+        logger.debug(f"Error fetching assets via API: {e}")
+    
+    return assets
+
+
 def parse_github_release_url(url: str) -> Optional[Tuple[str, str, Optional[str], Optional[str]]]:
     """
     Parse GitHub release URL to extract owner, repo, tag, and asset name.
@@ -176,16 +279,8 @@ def resolve_github_release_url(url: str) -> Optional[str]:
         # We have both tag and asset name, but we should verify via API
         # and get authenticated URL for private repos
         try:
-            # Use module-level GitHub token
-            github_token = get_github_token()
-            # Create GitHub instance
-            if github_token:
-                g = Github(github_token)
-                logger.debug("Using GitHub token for authentication")
-            else:
-                g = Github()
-                logger.debug("Using unauthenticated GitHub API access")
-            
+            # Create GitHub client
+            g = _create_github_client()
             repository = g.get_repo(f"{owner}/{repo}")
             
             # Get release by tag
@@ -198,48 +293,25 @@ def resolve_github_release_url(url: str) -> Optional[str]:
                     logger.error(f"Error fetching release: {e.status} {e.data}")
                 return None
             
-            # Find the asset by name - try raw_data first to avoid API call
-            try:
-                # Check if assets are in raw_data (avoids API call)
-                if hasattr(release, 'raw_data') and 'assets' in release.raw_data:
-                    for asset_data in release.raw_data['assets']:
-                        if asset_data.get('name') == asset_name:
-                            # Use authenticated API endpoint instead of browser_download_url
-                            asset_id = asset_data.get('id')
-                            if asset_id:
-                                api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_id}"
-                                logger.debug(f"Found asset in raw_data: {asset_name} -> API endpoint: {api_url}")
-                                return api_url
-                            else:
-                                # Fallback to browser_download_url if no asset_id
-                                download_url = asset_data.get('browser_download_url')
-                                logger.debug(f"Found asset in raw_data (no asset_id): {asset_name} -> {download_url}")
-                                return download_url
-            except (AttributeError, KeyError, TypeError):
-                pass
-            
-            # Fallback: use API call if raw_data not available
-            assets = release.get_assets()
-            for asset in assets:
-                if asset.name == asset_name:
-                    # Use authenticated API endpoint
-                    api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset.id}"
-                    logger.debug(f"Found asset: {asset.name} -> API endpoint: {api_url}")
-                    return api_url
+            # Find the asset by name
+            assets = _get_assets_from_release(release)
+            for asset_info in assets:
+                if asset_info['name'] == asset_name:
+                    # Use authenticated API endpoint if asset_id is available
+                    if 'id' in asset_info:
+                        api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_info['id']}"
+                        logger.debug(f"Found asset: {asset_name} -> API endpoint: {api_url}")
+                        return api_url
+                    else:
+                        # Fallback to browser_download_url
+                        logger.debug(f"Found asset (no asset_id): {asset_name} -> {asset_info['url']}")
+                        return asset_info['url']
             
             logger.error(f"Asset '{asset_name}' not found in release '{tag}'")
             return None
             
         except GithubException as e:
-            if e.status == 404:
-                if get_github_token():
-                    logger.error(f"Repository not found or access denied: {owner}/{repo}")
-                    logger.error("This may be a private repository. Ensure your token has 'repo' scope permissions.")
-                else:
-                    logger.error(f"Repository not found: {owner}/{repo}")
-                    logger.error("If this is a private repository, set GH_TOKEN environment variable.")
-            else:
-                logger.error(f"GitHub API error: {e.status} {e.data}")
+            _handle_github_exception(e, owner, repo)
             return None
         except Exception as e:
             logger.error(f"Unexpected error resolving GitHub release URL: {e}")
@@ -270,28 +342,8 @@ def fetch_releases(owner: str, repo: str, include_prereleases: bool = False) -> 
         List of Release objects from PyGithub, or None on error
     """
     try:
-        # Use module-level GitHub token
-        github_token = get_github_token()
-        # Create GitHub instance (with authentication if token provided)
-        if github_token:
-            g = Github(github_token)
-            logger.debug("Using GitHub token for authentication")
-            # Verify token is valid by checking rate limit (this also validates the token)
-            try:
-                rate_limit = g.get_rate_limit()
-                # Use resources.core for REST API rate limits (or rate for overall rate limit)
-                if hasattr(rate_limit, 'resources') and hasattr(rate_limit.resources, 'core'):
-                    logger.debug(f"Rate limit remaining: {rate_limit.resources.core.remaining}/{rate_limit.resources.core.limit}")
-                elif hasattr(rate_limit, 'rate'):
-                    logger.debug(f"Rate limit remaining: {rate_limit.rate.remaining}/{rate_limit.rate.limit}")
-                else:
-                    logger.debug("Rate limit checked (structure unknown)")
-            except Exception as e:
-                logger.warning(f"Could not verify GitHub token: {e}")
-        else:
-            g = Github()
-            logger.debug("Using unauthenticated GitHub API access")
-        
+        # Create GitHub client
+        g = _create_github_client()
         logger.debug(f"Fetching releases from: {owner}/{repo}")
         repository = g.get_repo(f"{owner}/{repo}")
         
@@ -309,19 +361,7 @@ def fetch_releases(owner: str, repo: str, include_prereleases: bool = False) -> 
         return releases
                 
     except GithubException as e:
-        if e.status == 404:
-            if get_github_token():
-                logger.error(f"Repository not found or access denied: {owner}/{repo}")
-                logger.error("This may be a private repository. Ensure your token has 'repo' scope permissions.")
-            else:
-                logger.error(f"Repository not found: {owner}/{repo}")
-                logger.error("If this is a private repository, set GH_TOKEN environment variable with a token that has 'repo' scope.")
-        elif e.status == 403:
-            logger.error(f"GitHub API rate limit exceeded or access forbidden")
-            if get_github_token():
-                logger.error("Check that your token has the necessary permissions (e.g., 'repo' scope for private repos)")
-        else:
-            logger.error(f"GitHub API error: {e.status} {e.data}")
+        _handle_github_exception(e, owner, repo)
         return None
     except Exception as e:
         logger.error(f"Unexpected error fetching releases: {e}")
@@ -349,24 +389,10 @@ def find_latest_image(releases: List) -> Optional[str]:
     
     logger.debug(f"Searching for image in latest release: {latest_release.tag_name}")
     
-    # Get assets from raw_data only (avoids API call)
-    asset_candidates = []
-    
-    try:
-        # Check if assets are in raw_data (avoids API call)
-        if hasattr(latest_release, 'raw_data') and 'assets' in latest_release.raw_data:
-            for asset_data in latest_release.raw_data['assets']:
-                asset_candidates.append({
-                    'name': asset_data.get('name', ''),
-                    'size': asset_data.get('size', 0),
-                    'url': asset_data.get('browser_download_url', '')
-                })
-            logger.debug(f"Found {len(asset_candidates)} assets from raw_data")
-        else:
-            logger.debug("No assets found in raw_data")
-            return None
-    except (AttributeError, KeyError, TypeError) as e:
-        logger.debug(f"Error accessing raw_data: {e}")
+    # Get assets from release
+    asset_candidates = _get_assets_from_release(latest_release)
+    if not asset_candidates:
+        logger.debug("No assets found in latest release")
         return None
     
     # Allowed image file extensions
@@ -434,32 +460,21 @@ def find_applicable_batch_update(releases: List, current_version: str, max_relea
     
     # Search through recent releases (they should be sorted by date, latest first)
     for release in releases_to_check:
-        # Get asset names from raw_data only (avoids API call)
-        asset_names = []
-        asset_urls = {}
-        
-        try:
-            # Check if assets are in raw_data (avoids API call)
-            if hasattr(release, 'raw_data') and 'assets' in release.raw_data:
-                for asset_data in release.raw_data['assets']:
-                    asset_name = asset_data.get('name', '')
-                    asset_names.append(asset_name)
-                    asset_urls[asset_name] = asset_data.get('browser_download_url', '')
-            else:
-                logger.debug(f"No assets found in raw_data for release {release.tag_name}")
-                continue
-        except (AttributeError, KeyError, TypeError) as e:
-            logger.debug(f"Error accessing raw_data for release {release.tag_name}: {e}")
+        # Get assets from release
+        assets = _get_assets_from_release(release)
+        if not assets:
+            logger.debug(f"No assets found for release {release.tag_name}")
             continue
         
         # Check asset names against pattern
-        for name in asset_names:
+        for asset_info in assets:
+            name = asset_info['name']
             match = re.match(pattern, name)
             if match:
                 variant = match.group(1)
                 next_version = match.group(2)
                 logger.debug(f"Found applicable batch update: {name} (variant: {variant}, updates to: {next_version})")
-                return asset_urls.get(name)
+                return asset_info['url']
     
     logger.debug(f"No applicable batch update found for version {current_version} in {len(releases_to_check)} recent releases")
     return None

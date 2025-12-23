@@ -3,6 +3,7 @@
 import logging
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -106,6 +107,30 @@ def unmount_partition(mount_point: Path) -> bool:
         return False
 
 
+@contextmanager
+def mount_context(device: str, mount_point: Path):
+    """
+    Context manager for mounting and automatically unmounting a partition.
+    
+    Args:
+        device: Device path to mount (e.g., '/dev/mmcblk0p2')
+        mount_point: Path where to mount the partition
+        
+    Yields:
+        mount_point: The path where the partition is mounted
+        
+    Raises:
+        RuntimeError: If mounting fails
+    """
+    if not mount_partition(device, mount_point):
+        raise RuntimeError(f"Failed to mount {device} to {mount_point}")
+    try:
+        yield mount_point
+    finally:
+        if not unmount_partition(mount_point):
+            logger.warning(f"Could not unmount {mount_point}")
+
+
 def sync_root_partitions(source: Optional[Path] = None, destination: Optional[Path] = None) -> bool:
     """
     Sync root partitions using rsync.
@@ -178,28 +203,20 @@ def execute_syncroot() -> int:
         _, partition_num, label = inactive
         logger.info(f"Inactive partition: {label} (p{partition_num})")
     
-    # Mount inactive partition
-    if not mount_partition(device, ROOT_UP):
-        return 1
-    
-    logger.info(f"Mounted {device} to {ROOT_UP}")
-    
-    # Sync partitions
-    sync_success = False
+    # Mount inactive partition and sync
     try:
-        logger.info(f"Syncing {ROOT_RO} to {ROOT_UP}...")
-        if not sync_root_partitions():
-            sync_success = False
-        else:
+        with mount_context(device, ROOT_UP) as mount_point:
+            logger.info(f"Mounted {device} to {mount_point}")
+            
+            logger.info(f"Syncing {ROOT_RO} to {mount_point}...")
+            if not sync_root_partitions():
+                return 1
+            
             logger.info("Sync completed successfully")
-            sync_success = True
-    finally:
-        # Always unmount after syncing
-        unmount_success = unmount_partition(ROOT_UP)
-        if not unmount_success:
-            logger.warning(f"Could not unmount {ROOT_UP}")
-    
-    return 0 if sync_success else 1
+            return 0
+    except RuntimeError as e:
+        logger.error(str(e))
+        return 1
 
 
 def execute_mount() -> int:

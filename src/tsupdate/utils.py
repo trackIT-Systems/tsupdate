@@ -15,6 +15,23 @@ logger = logging.getLogger(__name__)
 ARTIFACTS_DIR = Path("/data/tsupdate")
 
 
+def safe_cleanup(path: Path) -> None:
+    """
+    Safely remove a file, ignoring errors.
+    
+    Useful for cleanup operations where failure to remove is not critical.
+    
+    Args:
+        path: Path to file to remove
+    """
+    try:
+        if path and path.exists():
+            path.unlink()
+            logger.debug(f"Removed file: {path}")
+    except OSError:
+        pass  # Ignore cleanup errors
+
+
 def download_file(url: str, output_path: Path) -> bool:
     """
     Download file from URL.
@@ -87,12 +104,7 @@ def download_file(url: str, output_path: Path) -> bool:
     except Exception as e:
         logger.error(f"Failed to download file: {e}")
         # Clean up temporary file on failure
-        try:
-            if temp_path.exists():
-                temp_path.unlink()
-                logger.debug(f"Removed temporary download file: {temp_path}")
-        except OSError:
-            pass  # Ignore cleanup errors
+        safe_cleanup(temp_path)
         return False
 
 
@@ -171,12 +183,7 @@ def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Opt
     
     # Clean up any leftover temporary files from interrupted downloads
     temp_download_path = downloaded_path.with_suffix(downloaded_path.suffix + ".tmp")
-    if temp_download_path.exists():
-        try:
-            temp_download_path.unlink()
-            logger.debug(f"Removed leftover temporary download file: {temp_download_path}")
-        except OSError:
-            pass  # Ignore cleanup errors
+    safe_cleanup(temp_download_path)
     
     # Check if file already exists
     if downloaded_path.exists() and downloaded_path.is_file():

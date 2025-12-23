@@ -280,6 +280,25 @@ def get_inactive_partition() -> Optional[Tuple[str, int, str]]:
     return None
 
 
+def get_inactive_partition_info() -> Optional[dict]:
+    """
+    Get the inactive partition information as a dictionary.
+    
+    Returns:
+        Dictionary with keys 'device', 'partition_num', and 'label', or None
+    """
+    inactive = get_inactive_partition()
+    if not inactive:
+        return None
+    
+    device, partition_num, label = inactive
+    return {
+        'device': device,
+        'partition_num': partition_num,
+        'label': label
+    }
+
+
 # ============================================================================
 # Tryboot Detection Functions
 # ============================================================================
@@ -372,8 +391,6 @@ def format_status_text(status: Dict[str, Optional[str]]) -> str:
         Formatted status string
     """
     lines = []
-    lines.append("System Status")
-    lines.append("=" * 50)
     
     if status.get("os_pretty_name"):
         lines.append(f"OS: {status['os_pretty_name']}")
