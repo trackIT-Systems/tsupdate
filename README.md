@@ -56,8 +56,8 @@ sudo tsupdate persist --reboot  # Persist and reboot
 **`rollback`** - Revert from tryboot to previous partition
 
 ```bash
-sudo tsupdate rollback           # Rollback configuration
-sudo tsupdate rollback --reboot  # Rollback and reboot
+sudo tsupdate rollback              # Rollback and reboot automatically
+sudo tsupdate rollback --no-reboot  # Rollback without reboot
 ```
 
 ### Updates

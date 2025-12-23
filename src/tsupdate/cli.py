@@ -196,17 +196,16 @@ def main():
             "This command:\n"
             "  - Restores cmdline.txt to point to the previous partition\n"
             "  - Removes tryboot configuration files (tryboot.txt, tryline.txt)\n"
-            "  - Optionally reboots to complete the rollback\n\n"
+            "  - Automatically reboots the system (unless --no-reboot is specified)\n\n"
             "Used when booted via tryboot but something went wrong and you want to go back.\n"
             "The system must be booted via tryboot to use this command."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser_rollback.add_argument(
-        "--reboot",
-        "-r",
+        "--no-reboot",
         action="store_true",
-        help="Automatically reboot the system after rollback",
+        help="Do not reboot the system after rollback (default: reboot automatically)",
     )
     
     # syncroot command
@@ -391,7 +390,7 @@ def main():
     
     # Handle rollback command
     if args.command == "rollback":
-        exit_code = rollback_tryboot(reboot=args.reboot)
+        exit_code = rollback_tryboot(reboot=not args.no_reboot)
         sys.exit(exit_code)
     
     # Handle syncroot command

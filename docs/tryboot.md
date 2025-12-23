@@ -46,7 +46,7 @@ Located in `/boot/firmware/`:
 
 ### Rollback
 
-**`rollback_tryboot(reboot)`**: Restore previous partition configuration and remove tryboot files.
+**`rollback_tryboot(reboot=True)`**: Restore previous partition configuration and remove tryboot files. By default, automatically reboots the system after rollback.
 
 ## Tryboot Workflow
 
@@ -107,8 +107,11 @@ exit_code = execute_persist(reboot=True)
 ```python
 from tsupdate.tryboot import rollback_tryboot
 
-# Rollback and reboot
+# Rollback and reboot (default behavior)
 exit_code = rollback_tryboot(reboot=True)
+
+# Rollback without reboot
+exit_code = rollback_tryboot(reboot=False)
 ```
 
 ## CLI Commands
@@ -126,11 +129,11 @@ tsupdate persist
 # Persist and reboot
 tsupdate persist --reboot
 
-# Rollback from tryboot
+# Rollback from tryboot (auto-reboots by default)
 tsupdate rollback
 
-# Rollback and reboot
-tsupdate rollback --reboot
+# Rollback without auto-reboot
+tsupdate rollback --no-reboot
 ```
 
 ## Safety Features
@@ -139,4 +142,6 @@ tsupdate rollback --reboot
 - **Persistence check**: Prevents double-tryboot without persistence
 - **Automatic hardware rollback**: Firmware-level failsafe for boot failures
 - **Manual rollback**: Software rollback when booted via tryboot
+
+
 

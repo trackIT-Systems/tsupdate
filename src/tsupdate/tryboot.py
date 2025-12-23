@@ -308,7 +308,7 @@ def execute_persist(reboot: bool = False) -> int:
     return 0
 
 
-def rollback_tryboot(reboot: bool = False) -> int:
+def rollback_tryboot(reboot: bool = True) -> int:
     """
     Rollback from tryboot to the previous partition.
     
@@ -317,7 +317,7 @@ def rollback_tryboot(reboot: bool = False) -> int:
     but something went wrong and you want to go back.
     
     Args:
-        reboot: If True, automatically reboot the system after rollback
+        reboot: If True, automatically reboot the system after rollback (default: True)
         
     Returns:
         Exit code (0 for success, non-zero for failure)
