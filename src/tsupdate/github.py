@@ -3,12 +3,73 @@
 import logging
 import os
 import re
+import subprocess
 from typing import List, Optional, Tuple
 
 from github import Github
 from github.GithubException import GithubException
 
 logger = logging.getLogger(__name__)
+
+# Module-level GitHub token (loaded once at program start)
+_github_token: Optional[str] = None
+
+
+def initialize_github_token() -> None:
+    """
+    Initialize the GitHub token from environment variable or GitHub CLI.
+    
+    First checks GH_TOKEN environment variable. If not set, tries to get
+    the token from GitHub CLI ('gh auth token').
+    
+    This should be called once at program start to load the token.
+    """
+    global _github_token
+    
+    # First, check environment variable
+    token = os.environ.get("GH_TOKEN")
+    if token:
+        _github_token = token.strip() if token.strip() else None
+        if _github_token:
+            logger.debug("Loaded GitHub token from GH_TOKEN environment variable")
+            return
+    
+    # If not in environment, try GitHub CLI
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        token = result.stdout.strip()
+        if token:
+            _github_token = token
+            logger.debug("Loaded GitHub token from 'gh auth token'")
+            return
+    except FileNotFoundError:
+        logger.debug("GitHub CLI ('gh') not found")
+    except subprocess.TimeoutExpired:
+        logger.debug("'gh auth token' command timed out")
+    except subprocess.CalledProcessError as e:
+        logger.debug(f"'gh auth token' failed: {e.stderr.strip()}")
+    except Exception as e:
+        logger.debug(f"Unexpected error running 'gh auth token': {e}")
+    
+    # No token available
+    _github_token = None
+    logger.debug("No GitHub token available (neither GH_TOKEN nor 'gh auth token')")
+
+
+def get_github_token() -> Optional[str]:
+    """
+    Get the GitHub token (if set).
+    
+    Returns:
+        GitHub token string or None if not set
+    """
+    return _github_token
 
 
 def parse_github_repo_url(support_url: str) -> Optional[Tuple[str, str]]:
@@ -115,11 +176,11 @@ def resolve_github_release_url(url: str) -> Optional[str]:
         # We have both tag and asset name, but we should verify via API
         # and get authenticated URL for private repos
         try:
-            # Read GitHub token from environment
-            github_token = os.environ.get("GH_TOKEN")
+            # Use module-level GitHub token
+            github_token = get_github_token()
             # Create GitHub instance
-            if github_token and github_token.strip():
-                g = Github(github_token.strip())
+            if github_token:
+                g = Github(github_token)
                 logger.debug("Using GitHub token for authentication")
             else:
                 g = Github()
@@ -171,7 +232,7 @@ def resolve_github_release_url(url: str) -> Optional[str]:
             
         except GithubException as e:
             if e.status == 404:
-                if github_token:
+                if get_github_token():
                     logger.error(f"Repository not found or access denied: {owner}/{repo}")
                     logger.error("This may be a private repository. Ensure your token has 'repo' scope permissions.")
                 else:
@@ -209,17 +270,22 @@ def fetch_releases(owner: str, repo: str, include_prereleases: bool = False) -> 
         List of Release objects from PyGithub, or None on error
     """
     try:
-        # Read GitHub token from environment
-        github_token = os.environ.get("GH_TOKEN")
+        # Use module-level GitHub token
+        github_token = get_github_token()
         # Create GitHub instance (with authentication if token provided)
-        if github_token and github_token.strip():
-            token_value = github_token.strip()
-            g = Github(token_value)
+        if github_token:
+            g = Github(github_token)
             logger.debug("Using GitHub token for authentication")
             # Verify token is valid by checking rate limit (this also validates the token)
             try:
                 rate_limit = g.get_rate_limit()
-                logger.debug(f"Rate limit remaining: {rate_limit.core.remaining}/{rate_limit.core.limit}")
+                # Use resources.core for REST API rate limits (or rate for overall rate limit)
+                if hasattr(rate_limit, 'resources') and hasattr(rate_limit.resources, 'core'):
+                    logger.debug(f"Rate limit remaining: {rate_limit.resources.core.remaining}/{rate_limit.resources.core.limit}")
+                elif hasattr(rate_limit, 'rate'):
+                    logger.debug(f"Rate limit remaining: {rate_limit.rate.remaining}/{rate_limit.rate.limit}")
+                else:
+                    logger.debug("Rate limit checked (structure unknown)")
             except Exception as e:
                 logger.warning(f"Could not verify GitHub token: {e}")
         else:
@@ -244,7 +310,7 @@ def fetch_releases(owner: str, repo: str, include_prereleases: bool = False) -> 
                 
     except GithubException as e:
         if e.status == 404:
-            if github_token:
+            if get_github_token():
                 logger.error(f"Repository not found or access denied: {owner}/{repo}")
                 logger.error("This may be a private repository. Ensure your token has 'repo' scope permissions.")
             else:
@@ -252,7 +318,7 @@ def fetch_releases(owner: str, repo: str, include_prereleases: bool = False) -> 
                 logger.error("If this is a private repository, set GH_TOKEN environment variable with a token that has 'repo' scope.")
         elif e.status == 403:
             logger.error(f"GitHub API rate limit exceeded or access forbidden")
-            if github_token:
+            if get_github_token():
                 logger.error("Check that your token has the necessary permissions (e.g., 'repo' scope for private repos)")
         else:
             logger.error(f"GitHub API error: {e.status} {e.data}")

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 from urllib.request import Request, urlopen, urlretrieve
 
-from tsupdate.github import parse_github_release_url, resolve_github_release_url
+from tsupdate.github import parse_github_release_url, resolve_github_release_url, get_github_token
 
 logger = logging.getLogger(__name__)
 
@@ -40,14 +40,14 @@ def download_file(url: str, output_path: Path) -> bool:
         # Check if this is a GitHub API URL (requires authentication) or GitHub URL
         is_github_api_url = url.startswith("https://api.github.com/repos/") and "/releases/assets/" in url
         is_github_url = url.startswith("https://github.com/") or url.startswith("https://api.github.com/")
-        github_token = os.environ.get("GH_TOKEN")
-        use_auth = (is_github_api_url or is_github_url) and github_token and github_token.strip()
+        github_token = get_github_token()
+        use_auth = (is_github_api_url or is_github_url) and github_token
         
         if use_auth:
             logger.debug("Using authenticated download for GitHub URL")
             # Use authenticated request for GitHub downloads
             request = Request(url)
-            request.add_header("Authorization", f"Bearer {github_token.strip()}")
+            request.add_header("Authorization", f"Bearer {github_token}")
             request.add_header("Accept", "application/octet-stream")
             request.add_header("User-Agent", "tsupdate/1.0")
             

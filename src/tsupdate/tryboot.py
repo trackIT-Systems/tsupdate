@@ -404,12 +404,12 @@ def rollback_tryboot(reboot: bool = False) -> int:
     return 0
 
 
-def execute_tryboot(reboot: bool = False) -> int:
+def execute_tryboot(reboot: bool = True) -> int:
     """
     Execute the tryboot process.
     
     Args:
-        reboot: If True, automatically reboot the system after configuration
+        reboot: If True, automatically reboot the system after configuration (default: True)
         
     Returns:
         Exit code (0 for success, non-zero for failure)

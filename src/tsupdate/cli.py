@@ -12,7 +12,7 @@ from tsupdate.tryboot import execute_tryboot, execute_persist, rollback_tryboot
 from tsupdate.syncroot import execute_syncroot, execute_mount, execute_unmount
 from tsupdate.apply import execute_apply
 from tsupdate.restore import execute_restore
-from tsupdate.github import parse_github_repo_url, fetch_releases, find_latest_image, find_applicable_batch_update
+from tsupdate.github import parse_github_repo_url, fetch_releases, find_latest_image, find_applicable_batch_update, initialize_github_token
 import logging
 
 logger = logging.getLogger(__name__)
@@ -162,16 +162,16 @@ def main():
             "This command:\n"
             "  - Copies cmdline.txt to tryline.txt and switches the partition\n"
             "  - Copies config.txt to tryboot.txt\n"
-            "  - Adds cmdline=tryline.txt entry to tryboot.txt\n\n"
+            "  - Adds cmdline=tryline.txt entry to tryboot.txt\n"
+            "  - Automatically reboots the system (unless --no-reboot is specified)\n\n"
             "The system must be booted regularly (not via tryboot) to use this command."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser_tryboot.add_argument(
-        "--reboot",
-        "-r",
+        "--no-reboot",
         action="store_true",
-        help="Automatically reboot the system after configuring tryboot",
+        help="Do not reboot the system after configuring tryboot (default: reboot automatically)",
     )
     
     # persist command
@@ -358,6 +358,9 @@ def main():
     # Configure logging based on verbose flag
     configure_logging(verbose=args.verbose)
     
+    # Initialize GitHub token once at program start
+    initialize_github_token()
+    
     # If no command is specified, print help
     if not args.command:
         parser.print_help()
@@ -383,7 +386,7 @@ def main():
     
     # Handle tryboot command
     if args.command == "tryboot":
-        exit_code = execute_tryboot(reboot=args.reboot)
+        exit_code = execute_tryboot(reboot=not args.no_reboot)
         sys.exit(exit_code)
     
     # Handle persist command
