@@ -9,6 +9,7 @@ The `daemon` module provides automatic background update management for tsOS-bas
 ## Features
 
 - **Automatic update checking** - Periodically queries GitHub releases for available updates
+- **Maintenance schedule support** - Optional maintenance windows to restrict updates to specific times
 - **Tryboot persistence** - On startup after tryboot, waits then persists configuration
 - **Safe update application** - Syncs root partition, applies update, then uses tryboot
 - **User notification** - Notifies via system logs and wall broadcasts
@@ -145,6 +146,12 @@ sudo tsupdated --verbose
 
 # Run with custom config and verbose logging
 sudo tsupdated -c /path/to/config.yml -v
+
+# Run with custom schedule file
+sudo tsupdated --schedule /path/to/schedule.yml
+
+# Run with custom config and schedule
+sudo tsupdated -c /path/to/config.yml -s /path/to/schedule.yml
 ```
 
 ### Monitoring
@@ -205,16 +212,20 @@ When the daemon is about to reboot, it broadcasts a message via `wall` showing:
 
 1. **Root Check**: Verify running as root (required for partition operations)
 2. **Load Config**: Parse YAML configuration file, apply defaults
-3. **GitHub Token**: Initialize GitHub authentication (from `GH_TOKEN` or `gh` CLI)
-4. **Signal Handlers**: Register handlers for SIGTERM and SIGINT
-5. **Tryboot Check**: If booted via tryboot, wait until system uptime reaches persist timeout then persist
+3. **Load Schedule**: Parse schedule YAML file (if provided), find maintenance entry
+4. **GitHub Token**: Initialize GitHub authentication (from `GH_TOKEN` or `gh` CLI)
+5. **Signal Handlers**: Register handlers for SIGTERM and SIGINT
+6. **Tryboot Check**: If booted via tryboot, wait until system uptime reaches persist timeout then persist
 
 ### Update Check Loop
 
 1. **Check Timer**: Wait for `check_interval` seconds (sleeping in small increments)
 2. **Query GitHub**: Fetch releases from repository
 3. **Find Update**: Look for applicable batch update matching current version
-4. **If Found**: Proceed to update workflow
+4. **If Found**: 
+   - If maintenance schedule is configured, check if current time is within maintenance window
+   - If outside maintenance window: log and defer update, return to step 1
+   - If inside maintenance window (or no schedule): proceed to update workflow
 5. **If Not Found**: Log and return to step 1
 
 ### Update Application Workflow
@@ -237,11 +248,60 @@ When the daemon is about to reboot, it broadcasts a message via `wall` showing:
    - Waits until system uptime reaches `persist_timeout` then persists configuration
    - Continues normal operation
 
+### Maintenance Schedule
+
+The daemon supports optional maintenance windows to restrict when updates are applied. This is useful for production environments where updates should only occur during scheduled maintenance periods.
+
+**How it works:**
+
+1. The daemon reads a `schedule.yml` file (default: `/boot/firmware/schedule.yml`)
+2. Looks for a schedule entry named `maintenance`
+3. When an update is found, checks if current time is within the maintenance window
+4. If outside the window: logs and defers the update (continues checking at next interval)
+5. If inside the window: proceeds with normal update workflow
+
+**Schedule File Format:**
+
+The schedule file uses the same format as other tsOS schedule files:
+
+```yaml
+schedule:
+- name: maintenance
+  start: '10:00'
+  stop: '12:00'
+```
+
+The `start` and `stop` fields support:
+- Fixed times: `'10:00'`, `'14:30'`
+- Sunrise/sunset calculations: `sunset-00:30`, `sunrise+02:00`
+
+**Command-line Options:**
+
+- `--schedule PATH` or `-s PATH`: Specify path to schedule file (default: `/boot/firmware/schedule.yml`)
+
+**Behavior:**
+
+- If schedule file doesn't exist: Updates can be applied at any time (normal behavior)
+- If schedule file exists but no `maintenance` entry: Updates can be applied at any time
+- If `maintenance` entry exists: Updates are only applied during the specified window
+- Updates found outside the window are logged and deferred, not skipped permanently
+
+**Example:**
+
+```bash
+# Run daemon with maintenance schedule
+sudo tsupdated --schedule /boot/firmware/schedule.yml
+
+# Or specify custom schedule location
+sudo tsupdated -s /etc/tsupdate/maintenance.yml
+```
+
 ### Error Handling
 
 The daemon is designed to never crash:
 
 - **Configuration Errors**: Use defaults if config is missing/invalid
+- **Schedule Errors**: Log warnings but continue operation (updates can be applied at any time)
 - **Update Check Errors**: Log and retry at next interval
 - **Update Application Errors**: Log, clean up, return to main loop
 - **Network Errors**: Log and retry at next interval
@@ -520,6 +580,28 @@ EOF
 
 # 3. Start daemon with environment
 sudo -E systemctl start tsupdated
+```
+
+### Maintenance Schedule Setup
+
+```bash
+# 1. Create schedule file with maintenance window
+sudo tee /boot/firmware/schedule.yml << 'EOF'
+schedule:
+- name: maintenance
+  start: '10:00'
+  stop: '12:00'
+EOF
+
+# 2. Update systemd service to use schedule (edit /etc/systemd/system/tsupdated.service)
+# Add --schedule /boot/firmware/schedule.yml to ExecStart line
+
+# 3. Reload and restart daemon
+sudo systemctl daemon-reload
+sudo systemctl restart tsupdated
+
+# 4. Verify maintenance schedule is loaded
+sudo journalctl -u tsupdated | grep -i maintenance
 ```
 
 ### Development Testing

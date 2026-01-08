@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     "PyGithub>=2.0.0",
     "PyYAML>=6.0.0",
+    "scheduleparse @ git+https://github.com/trackIT-Systems/scheduleparse.git@2025.10.1",
 ]
 
 [project.optional-dependencies]

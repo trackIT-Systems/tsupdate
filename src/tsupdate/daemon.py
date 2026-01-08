@@ -18,6 +18,11 @@ from tsupdate.github import (
     initialize_github_token,
     parse_github_repo_url,
 )
+from tsupdate.schedule import (
+    find_maintenance_entry,
+    is_in_maintenance_window,
+    load_schedule,
+)
 from tsupdate.status import is_tryboot_active, read_booted_os_release
 from tsupdate.syncroot import execute_syncroot
 from tsupdate.tryboot import execute_tryboot, persist_boot_configuration
@@ -395,7 +400,7 @@ def apply_update_workflow(update_url: str, config: dict) -> bool:
         return False
 
 
-def main_loop(config: dict) -> None:
+def main_loop(config: dict, maintenance_entry: Optional[dict] = None) -> None:
     """
     Main daemon loop.
     
@@ -403,11 +408,17 @@ def main_loop(config: dict) -> None:
     
     Args:
         config: Configuration dictionary
+        maintenance_entry: Optional maintenance schedule entry dictionary
     """
     check_interval = config.get("check_interval", 3600)
     
     logger.info("Entering main update check loop")
     logger.info(f"Will check for updates every {check_interval} seconds")
+    
+    if maintenance_entry:
+        logger.info("Maintenance schedule is active - updates will only be applied during maintenance window")
+    else:
+        logger.info("No maintenance schedule configured - updates can be applied at any time")
     
     while not _shutdown_requested:
         try:
@@ -419,15 +430,38 @@ def main_loop(config: dict) -> None:
             if update_url:
                 logger.info(f"Update found: {update_url}")
                 
-                # Apply the update
-                success = apply_update_workflow(update_url, config)
-                
-                if success:
-                    # Reboot was initiated - daemon will exit
-                    logger.info("Tryboot reboot initiated - daemon exiting")
-                    sys.exit(0)
+                # Check if we're in maintenance window (if maintenance schedule is configured)
+                if maintenance_entry:
+                    if not is_in_maintenance_window(maintenance_entry):
+                        logger.info(
+                            "Update found but outside maintenance window - deferring update. "
+                            "Will check again at next interval."
+                        )
+                        # Continue to sleep and check again later
+                    else:
+                        # We're in maintenance window, proceed with update
+                        logger.info("Update found and within maintenance window - proceeding with update")
+                        
+                        # Apply the update
+                        success = apply_update_workflow(update_url, config)
+                        
+                        if success:
+                            # Reboot was initiated - daemon will exit
+                            logger.info("Tryboot reboot initiated - daemon exiting")
+                            sys.exit(0)
+                        else:
+                            logger.info("Update workflow did not complete - continuing normal operation")
                 else:
-                    logger.info("Update workflow did not complete - continuing normal operation")
+                    # No maintenance schedule, proceed with update immediately
+                    # Apply the update
+                    success = apply_update_workflow(update_url, config)
+                    
+                    if success:
+                        # Reboot was initiated - daemon will exit
+                        logger.info("Tryboot reboot initiated - daemon exiting")
+                        sys.exit(0)
+                    else:
+                        logger.info("Update workflow did not complete - continuing normal operation")
             else:
                 logger.info("No updates available")
             
@@ -451,12 +485,13 @@ def main_loop(config: dict) -> None:
     logger.info("Shutdown requested - exiting main loop")
 
 
-def run_daemon(config_path: Path, verbose: bool = False) -> None:
+def run_daemon(config_path: Path, schedule_path: Optional[Path] = None, verbose: bool = False) -> None:
     """
     Run the update daemon.
     
     Args:
         config_path: Path to configuration file
+        schedule_path: Optional path to schedule YAML file
         verbose: Enable debug logging
     """
     # Configure logging
@@ -479,13 +514,27 @@ def run_daemon(config_path: Path, verbose: bool = False) -> None:
     # Load configuration
     config = load_config(config_path)
     
+    # Load schedule and find maintenance entry
+    maintenance_entry = None
+    if schedule_path:
+        logger.info(f"Schedule file: {schedule_path}")
+        schedule = load_schedule(schedule_path)
+        if schedule:
+            maintenance_entry = find_maintenance_entry(schedule)
+            if maintenance_entry:
+                logger.info("Maintenance schedule loaded successfully")
+            else:
+                logger.info("No maintenance entry found in schedule - updates can be applied at any time")
+        else:
+            logger.info("Schedule file not found or invalid - updates can be applied at any time")
+    
     # Handle tryboot persistence on startup
     persist_timeout = config.get("persist_timeout", 600)
     handle_tryboot_persist(persist_timeout)
     
     # Enter main loop
     try:
-        main_loop(config)
+        main_loop(config, maintenance_entry=maintenance_entry)
     except KeyboardInterrupt:
         logger.info("Interrupted by keyboard - shutting down")
     except Exception as e:

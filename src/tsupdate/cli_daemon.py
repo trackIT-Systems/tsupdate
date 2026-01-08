@@ -42,12 +42,21 @@ def main() -> None:
         help="Enable debug logging",
     )
     
+    parser.add_argument(
+        "--schedule",
+        "-s",
+        type=Path,
+        default=Path("/boot/firmware/schedule.yml"),
+        metavar="PATH",
+        help="Path to schedule YAML file (default: /boot/firmware/schedule.yml)",
+    )
+    
     # Parse arguments
     args = parser.parse_args()
     
     # Run the daemon
     try:
-        run_daemon(config_path=args.config, verbose=args.verbose)
+        run_daemon(config_path=args.config, schedule_path=args.schedule, verbose=args.verbose)
     except KeyboardInterrupt:
         print("\nInterrupted by keyboard", file=sys.stderr)
         sys.exit(0)
