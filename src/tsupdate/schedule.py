@@ -8,9 +8,9 @@ from typing import Optional
 import yaml
 
 try:
-    from scheduleparse import ScheduleParser
+    from scheduleparse import ScheduleEntry
 except ImportError:
-    ScheduleParser = None  # type: ignore
+    ScheduleEntry = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ def is_in_maintenance_window(maintenance_entry: dict) -> bool:
     Returns:
         True if current time is within maintenance window, False otherwise
     """
-    if ScheduleParser is None:
+    if ScheduleEntry is None:
         logger.error("scheduleparse library not available - cannot check maintenance window")
         return False
     
@@ -105,22 +105,24 @@ def is_in_maintenance_window(maintenance_entry: dict) -> bool:
     
     start_str = maintenance_entry.get("start")
     stop_str = maintenance_entry.get("stop")
+    name = maintenance_entry.get("name", "maintenance")
     
     if not start_str or not stop_str:
         logger.warning("Maintenance entry missing 'start' or 'stop' field")
         return False
     
     try:
-        # Use scheduleparse to check if current time is within the schedule entry window
-        # The library should handle parsing start/stop times including sunrise/sunset calculations
-        parser = ScheduleParser()
+        # Create ScheduleEntry from the maintenance entry
+        # ScheduleEntry handles parsing start/stop times including sunrise/sunset calculations
+        schedule_entry = ScheduleEntry(
+            name=name,
+            start=start_str,
+            stop=stop_str,
+        )
         
-        # Get current datetime in system timezone
-        now = datetime.now()
-        
-        # Use scheduleparse to check if now is within the maintenance window
-        # The library should handle the schedule entry format and time calculations
-        in_window = parser.is_active(maintenance_entry, now)
+        # Check if current time is within the maintenance window
+        # Passing None uses current local time automatically
+        in_window = schedule_entry.active()
         
         if in_window:
             logger.info(f"Current time is within maintenance window ({start_str} - {stop_str})")
@@ -129,38 +131,56 @@ def is_in_maintenance_window(maintenance_entry: dict) -> bool:
         
         return in_window
         
-    except AttributeError:
-        # If is_active doesn't exist, try alternative API
-        try:
-            # Alternative: parse times and check manually
-            parser = ScheduleParser()
-            now = datetime.now()
-            start_time = parser.parse_time(start_str, now)
-            stop_time = parser.parse_time(stop_str, now)
-            
-            if start_time is None or stop_time is None:
-                logger.warning(f"Failed to parse maintenance window times: start={start_str}, stop={stop_str}")
-                return False
-            
-            # Check if current time is within the window
-            now_time = now.time()
-            if start_time <= stop_time:
-                # Normal case: window doesn't span midnight
-                in_window = start_time <= now_time <= stop_time
-            else:
-                # Window spans midnight (e.g., 22:00 to 02:00)
-                in_window = now_time >= start_time or now_time <= stop_time
-            
-            if in_window:
-                logger.info(f"Current time is within maintenance window ({start_str} - {stop_str})")
-            else:
-                logger.info(f"Current time is outside maintenance window ({start_str} - {stop_str})")
-            
-            return in_window
-        except Exception as e:
-            logger.error(f"Error checking maintenance window: {e}", exc_info=True)
-            return False
     except Exception as e:
         logger.error(f"Error checking maintenance window: {e}", exc_info=True)
         return False
+
+
+def get_next_maintenance_window_start(maintenance_entry: dict) -> Optional[datetime]:
+    """
+    Get the datetime when the next maintenance window starts.
+    
+    Args:
+        maintenance_entry: Maintenance schedule entry dictionary with 'start' and 'stop' fields
+        
+    Returns:
+        Datetime when next maintenance window starts, or None on error
+    """
+    if ScheduleEntry is None:
+        logger.error("scheduleparse library not available - cannot get next maintenance window")
+        return None
+    
+    if not isinstance(maintenance_entry, dict):
+        logger.warning("Invalid maintenance entry format")
+        return None
+    
+    start_str = maintenance_entry.get("start")
+    stop_str = maintenance_entry.get("stop")
+    name = maintenance_entry.get("name", "maintenance")
+    
+    if not start_str or not stop_str:
+        logger.warning("Maintenance entry missing 'start' or 'stop' field")
+        return None
+    
+    try:
+        # Create ScheduleEntry from the maintenance entry
+        schedule_entry = ScheduleEntry(
+            name=name,
+            start=start_str,
+            stop=stop_str,
+        )
+        
+        # Get next start time
+        next_start = schedule_entry.next_start()
+        
+        if next_start:
+            logger.debug(f"Next maintenance window starts at: {next_start}")
+            return next_start
+        else:
+            logger.warning("Could not determine next maintenance window start time")
+            return None
+        
+    except Exception as e:
+        logger.error(f"Error getting next maintenance window start: {e}", exc_info=True)
+        return None
 

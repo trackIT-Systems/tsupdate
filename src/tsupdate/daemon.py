@@ -5,6 +5,7 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -20,12 +21,14 @@ from tsupdate.github import (
 )
 from tsupdate.schedule import (
     find_maintenance_entry,
+    get_next_maintenance_window_start,
     is_in_maintenance_window,
     load_schedule,
 )
 from tsupdate.status import is_tryboot_active, read_booted_os_release
 from tsupdate.syncroot import execute_syncroot
 from tsupdate.tryboot import execute_tryboot, persist_boot_configuration
+from tsupdate.utils import ARTIFACTS_DIR, ensure_file
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +58,13 @@ def load_config(config_path: Path) -> dict:
         "max_releases": 5,
         "persist_timeout": 600,  # 10 minutes
         "update_countdown": 60,  # 1 minute
+        "do": "check",  # Regular behavior: what to do (nothing, check, download, apply)
+        "maintenance_check_interval": None,  # Maintenance behavior: check interval (None = use check_interval)
+        "maintenance_do": None,  # Maintenance behavior: what to do (None = use do, or "apply" if maintenance schedule exists)
     }
+    
+    # Valid values for do and maintenance_do
+    valid_modes = {"nothing", "check", "download", "apply"}
     
     # If config file doesn't exist, use defaults
     if not config_path.exists():
@@ -79,6 +88,61 @@ def load_config(config_path: Path) -> dict:
         # Merge user config with defaults
         config = default_config.copy()
         config.update(user_config)
+        
+        # Validate do (regular behavior)
+        if "do" in user_config:
+            mode = user_config.get("do")
+            if mode not in valid_modes:
+                logger.warning(
+                    f"Invalid do value: {mode}. "
+                    f"Valid values are: {', '.join(sorted(valid_modes))}. "
+                    f"Using default: {default_config['do']}"
+                )
+                config["do"] = default_config["do"]
+        
+        # Validate maintenance_do (maintenance behavior)
+        if "maintenance_do" in user_config:
+            mode = user_config.get("maintenance_do")
+            if mode not in valid_modes:
+                logger.warning(
+                    f"Invalid maintenance_do value: {mode}. "
+                    f"Valid values are: {', '.join(sorted(valid_modes))}. "
+                    f"Using default behavior"
+                )
+                config["maintenance_do"] = None
+        
+        # Validate and enforce minimum check_interval (must be integer, minimum 60 seconds)
+        min_interval = 60
+        check_interval = config.get("check_interval", 3600)
+        if not isinstance(check_interval, int):
+            logger.error(
+                f"check_interval must be an integer in seconds (got {type(check_interval).__name__}: {check_interval})"
+            )
+            sys.exit(1)
+        elif check_interval < min_interval:
+            logger.warning(
+                f"check_interval ({check_interval}) is less than minimum ({min_interval}s). "
+                f"Setting to {min_interval}s"
+            )
+            config["check_interval"] = min_interval
+        
+        # Set maintenance_check_interval default if not specified
+        if config.get("maintenance_check_interval") is None:
+            config["maintenance_check_interval"] = config.get("check_interval", 3600)
+        
+        # Validate and enforce minimum maintenance_check_interval (must be integer, minimum 60 seconds)
+        maintenance_check_interval = config.get("maintenance_check_interval", 3600)
+        if not isinstance(maintenance_check_interval, int):
+            logger.error(
+                f"maintenance_check_interval must be an integer in seconds (got {type(maintenance_check_interval).__name__}: {maintenance_check_interval})"
+            )
+            sys.exit(1)
+        elif maintenance_check_interval < min_interval:
+            logger.warning(
+                f"maintenance_check_interval ({maintenance_check_interval}) is less than minimum ({min_interval}s). "
+                f"Setting to {min_interval}s"
+            )
+            config["maintenance_check_interval"] = min_interval
         
         logger.info(f"Loaded configuration from {config_path}")
         logger.debug(f"Configuration: {config}")
@@ -258,6 +322,82 @@ def countdown_with_cancel(seconds: int) -> bool:
     return True
 
 
+def download_update(update_url: str, config: dict) -> Optional[Path]:
+    """
+    Download update file.
+    
+    Downloads the update file from URL to the artifacts directory.
+    
+    Args:
+        update_url: URL to update file
+        config: Configuration dictionary
+        
+    Returns:
+        Path to downloaded file if successful, None otherwise
+    """
+    try:
+        logger.info(f"Downloading update from {update_url}...")
+        
+        # Use ensure_file to download (or use cached file if already downloaded)
+        file_path, is_local = ensure_file(update_url, ARTIFACTS_DIR)
+        
+        if file_path is None:
+            logger.error("Failed to download update file")
+            return None
+        
+        if is_local:
+            logger.info(f"Using existing local file: {file_path}")
+        else:
+            file_size = file_path.stat().st_size
+            logger.info(f"Downloaded update file: {file_path} ({file_size} bytes)")
+        
+        return file_path
+        
+    except Exception as e:
+        logger.error(f"Error downloading update: {e}", exc_info=True)
+        return None
+
+
+def get_current_behavior(
+    config: dict, maintenance_entry: Optional[dict], in_maintenance_window: bool
+) -> tuple[int, str]:
+    """
+    Get current behavior configuration based on maintenance window status.
+    
+    Args:
+        config: Configuration dictionary
+        maintenance_entry: Optional maintenance schedule entry dictionary
+        in_maintenance_window: Whether currently in maintenance window
+        
+    Returns:
+        Tuple of (check_interval, do_mode) for current behavior
+    """
+    # If no maintenance schedule, always use regular behavior
+    if not maintenance_entry:
+        check_interval = config.get("check_interval", 3600)
+        do_mode = config.get("do", "check")
+        return (check_interval, do_mode)
+    
+    # If inside maintenance window, use maintenance behavior
+    if in_maintenance_window:
+        maintenance_check_interval = config.get("maintenance_check_interval")
+        if maintenance_check_interval is None:
+            # Default to regular check_interval if not specified
+            maintenance_check_interval = config.get("check_interval", 3600)
+        
+        maintenance_do = config.get("maintenance_do")
+        if maintenance_do is None:
+            # Default to "apply" if maintenance schedule exists but maintenance_do not specified
+            maintenance_do = "apply"
+        
+        return (maintenance_check_interval, maintenance_do)
+    
+    # Outside maintenance window, use regular behavior
+    check_interval = config.get("check_interval", 3600)
+    do_mode = config.get("do", "check")
+    return (check_interval, do_mode)
+
+
 def check_for_updates(config: dict) -> Optional[str]:
     """
     Check for available updates.
@@ -327,15 +467,15 @@ def check_for_updates(config: dict) -> Optional[str]:
         return None
 
 
-def apply_update_workflow(update_url: str, config: dict) -> bool:
+def sync_and_apply_update(update_file_path: Path, config: dict) -> bool:
     """
-    Complete update application workflow.
+    Sync root partition and apply update from file.
     
-    Downloads update, syncs root partition, applies update, notifies users,
+    Syncs root partition to inactive partition, applies update, notifies users,
     and initiates tryboot reboot after countdown.
     
     Args:
-        update_url: URL to update file
+        update_file_path: Path to downloaded update file
         config: Configuration dictionary
         
     Returns:
@@ -355,10 +495,11 @@ def apply_update_workflow(update_url: str, config: dict) -> bool:
         logger.info("Partition sync complete")
         
         # Step 2: Apply the update
-        logger.info(f"Applying update from {update_url}...")
-        notify_users(f"Downloading and applying update: {update_url}")
+        logger.info(f"Applying update from {update_file_path}...")
+        notify_users(f"Applying update: {update_file_path.name}")
         
-        apply_result = execute_apply(update_url, keep_download=False)
+        # Use file path directly (execute_apply will handle it)
+        apply_result = execute_apply(str(update_file_path), keep_download=False)
         if apply_result != 0:
             logger.error("Failed to apply update - aborting")
             notify_users("Update failed: could not apply update")
@@ -400,68 +541,178 @@ def apply_update_workflow(update_url: str, config: dict) -> bool:
         return False
 
 
+def apply_update_workflow(update_url: str, config: dict, update_file_path: Optional[Path] = None) -> bool:
+    """
+    Complete update application workflow.
+    
+    Downloads update (if not already downloaded), syncs root partition, applies update,
+    notifies users, and initiates tryboot reboot after countdown.
+    
+    Args:
+        update_url: URL to update file
+        config: Configuration dictionary
+        update_file_path: Optional path to already downloaded update file
+        
+    Returns:
+        True if update applied and reboot initiated, False on error or cancellation
+    """
+    try:
+        # Download update if not already provided
+        if update_file_path is None:
+            update_file_path = download_update(update_url, config)
+            if update_file_path is None:
+                logger.error("Failed to download update - aborting")
+                notify_users("Update failed: could not download update")
+                return False
+        else:
+            logger.info(f"Using already downloaded update file: {update_file_path}")
+        
+        # Sync and apply the update
+        return sync_and_apply_update(update_file_path, config)
+        
+    except Exception as e:
+        logger.error(f"Error during update workflow: {e}", exc_info=True)
+        notify_users(f"Update failed: {e}")
+        return False
+
+
 def main_loop(config: dict, maintenance_entry: Optional[dict] = None) -> None:
     """
     Main daemon loop.
     
     Periodically checks for updates and applies them when found.
+    Uses regular behavior by default, switches to maintenance behavior when inside maintenance window.
     
     Args:
         config: Configuration dictionary
         maintenance_entry: Optional maintenance schedule entry dictionary
     """
-    check_interval = config.get("check_interval", 3600)
-    
     logger.info("Entering main update check loop")
-    logger.info(f"Will check for updates every {check_interval} seconds")
     
     if maintenance_entry:
-        logger.info("Maintenance schedule is active - updates will only be applied during maintenance window")
+        regular_interval = config.get("check_interval", 3600)
+        regular_do = config.get("do", "check")
+        maintenance_interval = config.get("maintenance_check_interval", regular_interval)
+        maintenance_do = config.get("maintenance_do", "apply")
+        logger.info(
+            f"Maintenance schedule is active - "
+            f"Regular: check_interval={regular_interval}s, do={regular_do}; "
+            f"Maintenance: check_interval={maintenance_interval}s, do={maintenance_do}"
+        )
     else:
-        logger.info("No maintenance schedule configured - updates can be applied at any time")
+        check_interval = config.get("check_interval", 3600)
+        do_mode = config.get("do", "check")
+        logger.info(f"No maintenance schedule configured - check_interval={check_interval}s, do={do_mode}")
     
     while not _shutdown_requested:
         try:
-            logger.info("Checking for updates...")
+            # Determine if we're in maintenance window
+            in_maintenance_window = False
+            if maintenance_entry:
+                in_maintenance_window = is_in_maintenance_window(maintenance_entry)
+            
+            # Get current behavior based on maintenance window status
+            check_interval, do_mode = get_current_behavior(config, maintenance_entry, in_maintenance_window)
+            
+            # If mode is "nothing", skip check entirely
+            if do_mode == "nothing":
+                if in_maintenance_window:
+                    logger.warning("Mode is 'nothing' but inside maintenance window - this is unusual, skipping check")
+                else:
+                    logger.debug(f"Mode is 'nothing' - skipping check")
+                
+                # If outside maintenance window, wait until next maintenance window starts
+                if maintenance_entry and not in_maintenance_window:
+                    next_start = get_next_maintenance_window_start(maintenance_entry)
+                    if next_start:
+                        now = datetime.now(next_start.tzinfo) if next_start.tzinfo else datetime.now()
+                        sleep_seconds = (next_start - now).total_seconds()
+                        if sleep_seconds > 0:
+                            logger.info(f"Waiting until next maintenance window starts at {next_start.strftime('%Y-%m-%d %H:%M:%S %Z')} ({sleep_seconds:.0f} seconds)")
+                            elapsed = 0
+                            while elapsed < sleep_seconds and not _shutdown_requested:
+                                sleep_time = min(10, sleep_seconds - elapsed)
+                                time.sleep(sleep_time)
+                                elapsed += sleep_time
+                        else:
+                            # Next start is in the past (shouldn't happen, but handle gracefully)
+                            logger.warning("Next maintenance window start is in the past, using check_interval")
+                            elapsed = 0
+                            while elapsed < check_interval and not _shutdown_requested:
+                                sleep_time = min(10, check_interval - elapsed)
+                                time.sleep(sleep_time)
+                                elapsed += sleep_time
+                    else:
+                        # Could not determine next maintenance window, fall back to check_interval
+                        logger.warning("Could not determine next maintenance window, using check_interval")
+                        logger.info(f"Next update check in {check_interval} seconds")
+                        elapsed = 0
+                        while elapsed < check_interval and not _shutdown_requested:
+                            sleep_time = min(10, check_interval - elapsed)
+                            time.sleep(sleep_time)
+                            elapsed += sleep_time
+                else:
+                    # Inside window or no schedule - use check_interval
+                    logger.info(f"Next update check in {check_interval} seconds")
+                    elapsed = 0
+                    while elapsed < check_interval and not _shutdown_requested:
+                        sleep_time = min(10, check_interval - elapsed)
+                        time.sleep(sleep_time)
+                        elapsed += sleep_time
+                continue
             
             # Check for available updates
+            logger.info("Checking for updates...")
             update_url = check_for_updates(config)
             
             if update_url:
                 logger.info(f"Update found: {update_url}")
                 
-                # Check if we're in maintenance window (if maintenance schedule is configured)
-                if maintenance_entry:
-                    if not is_in_maintenance_window(maintenance_entry):
+                # Determine what to do based on current behavior mode
+                if do_mode == "check":
+                    if in_maintenance_window:
                         logger.info(
-                            "Update found but outside maintenance window - deferring update. "
-                            "Will check again at next interval."
+                            "Update found in maintenance window (mode: check) - "
+                            "deferring update. Will check again at next interval."
                         )
-                        # Continue to sleep and check again later
                     else:
-                        # We're in maintenance window, proceed with update
-                        logger.info("Update found and within maintenance window - proceeding with update")
-                        
-                        # Apply the update
-                        success = apply_update_workflow(update_url, config)
-                        
-                        if success:
-                            # Reboot was initiated - daemon will exit
-                            logger.info("Tryboot reboot initiated - daemon exiting")
-                            sys.exit(0)
-                        else:
-                            logger.info("Update workflow did not complete - continuing normal operation")
-                else:
-                    # No maintenance schedule, proceed with update immediately
-                    # Apply the update
-                    success = apply_update_workflow(update_url, config)
+                        logger.info(
+                            "Update found (mode: check) - "
+                            "deferring update. Will check again at next interval."
+                        )
+                    # Just log and continue to sleep
+                elif do_mode == "download":
+                    if in_maintenance_window:
+                        logger.info(
+                            "Update found in maintenance window (mode: download) - "
+                            "downloading update file."
+                        )
+                    else:
+                        logger.info(
+                            "Update found (mode: download) - "
+                            "downloading update file."
+                        )
+                    update_file_path = download_update(update_url, config)
+                    if update_file_path:
+                        logger.info(
+                            f"Update downloaded successfully: {update_file_path}. "
+                            "Will apply during next maintenance window or when mode changes to 'apply'."
+                        )
+                    else:
+                        logger.error("Failed to download update")
+                elif do_mode == "apply":
+                    if in_maintenance_window:
+                        logger.info("Update found in maintenance window (mode: apply) - proceeding with full update workflow")
+                    else:
+                        logger.info("Update found (mode: apply) - proceeding with full update workflow")
                     
+                    success = apply_update_workflow(update_url, config)
                     if success:
-                        # Reboot was initiated - daemon will exit
                         logger.info("Tryboot reboot initiated - daemon exiting")
                         sys.exit(0)
                     else:
                         logger.info("Update workflow did not complete - continuing normal operation")
+                # else: nothing mode already handled above
             else:
                 logger.info("No updates available")
             

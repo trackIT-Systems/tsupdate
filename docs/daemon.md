@@ -99,19 +99,43 @@ Configuration is stored in YAML format. Default location: `/boot/firmware/tsupda
 - Users can cancel during this countdown
 - Example: `60` (1 minute), `300` (5 minutes)
 
+**`do`** (string, default: "check")
+- Regular behavior: what to do when checking for updates
+- Valid values:
+  - `nothing`: Skip update check entirely
+  - `check`: Check for updates but don't download or apply (default)
+  - `download`: Check for updates and download if available, but don't apply
+  - `apply`: Perform full update workflow (check → download → sync → apply → reboot)
+- Applies when no maintenance schedule is configured, or when outside maintenance window
+- Example: `"download"` (pre-download updates)
+
+**`maintenance_check_interval`** (integer, optional)
+- Maintenance behavior: how often to check for updates during maintenance window (in seconds)
+- If not specified, uses `check_interval` value
+- Only applies when inside maintenance window
+- Example: `300` (5 minutes during maintenance window)
+
+**`maintenance_do`** (string, optional)
+- Maintenance behavior: what to do when checking for updates during maintenance window
+- Valid values: `nothing`, `check`, `download`, `apply`
+- If not specified, defaults to `"apply"` when maintenance schedule exists
+- Only applies when inside maintenance window
+- Example: `"apply"` (automatically apply updates during maintenance window)
+
 ### Example Configuration
 
 ```yaml
-# Check for updates every 6 hours
-check_interval: 21600
+# Regular behavior (applies outside maintenance window or when no schedule)
+check_interval: 21600  # Check every 6 hours
+do: download  # Pre-download updates
 
-# Only stable releases
+# Maintenance behavior (applies inside maintenance window)
+maintenance_check_interval: 300  # Check every 5 minutes during maintenance
+maintenance_do: apply  # Automatically apply updates
+
+# Other settings
 include_prereleases: false
-
-# Wait until 15 minutes of uptime before persisting after tryboot
 persist_timeout: 900
-
-# Give users 2 minutes to cancel update
 update_countdown: 120
 ```
 
@@ -220,13 +244,18 @@ When the daemon is about to reboot, it broadcasts a message via `wall` showing:
 ### Update Check Loop
 
 1. **Check Timer**: Wait for `check_interval` seconds (sleeping in small increments)
-2. **Query GitHub**: Fetch releases from repository
-3. **Find Update**: Look for applicable batch update matching current version
-4. **If Found**: 
-   - If maintenance schedule is configured, check if current time is within maintenance window
-   - If outside maintenance window: log and defer update, return to step 1
-   - If inside maintenance window (or no schedule): proceed to update workflow
-5. **If Not Found**: Log and return to step 1
+2. **Maintenance Window Check**: If maintenance schedule configured, determine if in window
+3. **Mode Check**: If outside window and mode is `nothing`, skip to step 1 (don't check)
+4. **Query GitHub**: Fetch releases from repository
+5. **Find Update**: Look for applicable batch update matching current version
+6. **If Found**: 
+   - **Inside maintenance window**: Always proceed with full workflow (download → sync → apply → reboot)
+   - **Outside maintenance window**: Uses regular behavior (`check_interval`, `do`):
+     - `nothing`: Already skipped at step 3
+     - `check`: Log update availability, return to step 1
+     - `download`: Download update file, return to step 1
+     - `apply`: Proceed with full workflow (ignore maintenance window)
+7. **If Not Found**: Log and return to step 1
 
 ### Update Application Workflow
 
@@ -256,9 +285,9 @@ The daemon supports optional maintenance windows to restrict when updates are ap
 
 1. The daemon reads a `schedule.yml` file (default: `/boot/firmware/schedule.yml`)
 2. Looks for a schedule entry named `maintenance`
-3. When an update is found, checks if current time is within the maintenance window
-4. If outside the window: logs and defers the update (continues checking at next interval)
-5. If inside the window: proceeds with normal update workflow
+3. When checking for updates, determines if current time is within the maintenance window
+4. **If inside the window**: Uses maintenance behavior (`maintenance_check_interval`, `maintenance_do`)
+5. **If outside the window**: Uses regular behavior (`check_interval`, `do`)
 
 **Schedule File Format:**
 
@@ -281,10 +310,12 @@ The `start` and `stop` fields support:
 
 **Behavior:**
 
-- If schedule file doesn't exist: Updates can be applied at any time (normal behavior)
-- If schedule file exists but no `maintenance` entry: Updates can be applied at any time
-- If `maintenance` entry exists: Updates are only applied during the specified window
-- Updates found outside the window are logged and deferred, not skipped permanently
+- If schedule file doesn't exist: Always uses regular behavior (`check_interval`, `do`)
+- If schedule file exists but no `maintenance` entry: Always uses regular behavior
+- If `maintenance` entry exists: Switches between regular and maintenance behaviors based on current time
+- Regular behavior (`check_interval`, `do`) applies outside maintenance window
+- Maintenance behavior (`maintenance_check_interval`, `maintenance_do`) applies inside maintenance window
+- Default maintenance behavior: Uses `check_interval` and `do="apply"` if not specified
 
 **Example:**
 

@@ -38,3 +38,23 @@ persist_timeout: 600
 # Default: 60 (1 minute)
 update_countdown: 60
 
+# Regular behavior (applies outside maintenance window or when no maintenance schedule)
+# What to do when checking for updates
+# Valid values: nothing, check, download, apply
+# - nothing: Skip update check entirely
+# - check: Check for updates but don't download or apply (default)
+# - download: Check and download updates but don't apply
+# - apply: Perform full update workflow (check → download → sync → apply → reboot)
+# Default: check
+# do: check
+
+# Maintenance behavior (applies inside maintenance window)
+# How often to check for updates during maintenance window (in seconds)
+# If not specified, uses check_interval value
+# maintenance_check_interval: 300
+
+# What to do when checking for updates during maintenance window
+# Valid values: nothing, check, download, apply
+# If not specified, defaults to "apply" when maintenance schedule exists
+# maintenance_do: apply
+
