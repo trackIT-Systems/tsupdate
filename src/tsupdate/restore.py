@@ -408,16 +408,4 @@ def execute_restore(
         
         if loop_device:
             remove_loopback(loop_device)
-        
-        # Cleanup: remove downloaded/extracted files unless keep_image is set or it's a local file
-        if not keep_image and not is_local_file:
-            if downloaded_path:
-                safe_cleanup(downloaded_path)
-            # Remove extracted image if it's different from downloaded
-            if image_path and image_path != downloaded_path:
-                safe_cleanup(image_path)
-        elif is_local_file:
-            logger.debug("Using local file, no cleanup needed")
-        else:
-            logger.info(f"Keeping image files in {artifacts_path}")
 

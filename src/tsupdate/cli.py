@@ -12,10 +12,40 @@ from tsupdate.tryboot import execute_tryboot, execute_persist, rollback_tryboot
 from tsupdate.syncroot import execute_syncroot, execute_mount, execute_unmount
 from tsupdate.apply import execute_apply
 from tsupdate.restore import execute_restore
+from tsupdate.utils import ensure_file, ARTIFACTS_DIR
 from tsupdate.github import parse_github_repo_url, fetch_releases, find_latest_image, find_applicable_batch_update, initialize_github_token
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def execute_download(file_source: str) -> int:
+    """
+    Execute the download command.
+    
+    Downloads a file from URL or uses local file if provided.
+    Reads GH_TOKEN from environment variable for GitHub authentication.
+    
+    Args:
+        file_source: URL or local file path to download
+    
+    Returns:
+        Exit code (0 for success, non-zero for failure)
+    """
+    file_path, is_local = ensure_file(file_source, ARTIFACTS_DIR)
+    
+    if file_path is None:
+        logger.error("Failed to download file")
+        return 1
+    
+    if is_local:
+        print(f"Using local file: {file_path}")
+    else:
+        file_size = file_path.stat().st_size
+        print(f"Downloaded file: {file_path}")
+        print(f"Size: {file_size} bytes")
+    
+    return 0
 
 
 def execute_check(include_prereleases: bool = False, max_releases: int = 5, github_url: Optional[str] = None) -> int:
@@ -311,6 +341,28 @@ def main():
         help="Keep downloaded image file after restore",
     )
     
+    # download command
+    parser_download = subparsers.add_parser(
+        "download",
+        help="Download update or restore file",
+        description=(
+            "Download a file from URL or use local file if provided.\n\n"
+            "This command:\n"
+            "  - Downloads the file from URL to the artifacts directory (/data/tsupdate/)\n"
+            "  - Supports resumable downloads (automatically resumes interrupted downloads)\n"
+            "  - Handles GitHub release URLs with authentication (uses GH_TOKEN if set)\n"
+            "  - Reuses cached files if they already exist\n"
+            "  - Prints the path where the file was downloaded\n\n"
+            "The file is saved in the artifacts directory and can be used later with apply or restore commands."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser_download.add_argument(
+        "file_source",
+        type=str,
+        help="URL or local file path to download",
+    )
+    
     # check command
     parser_check = subparsers.add_parser(
         "check",
@@ -420,6 +472,11 @@ def main():
             partition=args.partition,
             keep_image=args.keep_image,
         )
+        sys.exit(exit_code)
+    
+    # Handle download command
+    if args.command == "download":
+        exit_code = execute_download(args.file_source)
         sys.exit(exit_code)
     
     # Handle check command

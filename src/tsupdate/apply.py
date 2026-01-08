@@ -18,7 +18,7 @@ from tsupdate.syncroot import (
     mount_context,
     ROOT_UP,
 )
-from tsupdate.utils import ARTIFACTS_DIR, ensure_file, safe_cleanup
+from tsupdate.utils import ARTIFACTS_DIR, ensure_file
 
 logger = logging.getLogger(__name__)
 
@@ -542,14 +542,6 @@ def execute_apply(update_source: str, keep_download: bool = False) -> int:
                 logger.debug(f"Removed temporary directory: {extracted_dir}")
             except OSError as e:
                 logger.warning(f"Could not remove temporary directory {extracted_dir}: {e}")
-        
-        # Cleanup: remove downloaded file unless keep_download is set or it's a local file
-        if not keep_download and not is_local_file and update_file_path:
-            safe_cleanup(update_file_path)
-        elif is_local_file:
-            logger.debug("Using local file, no cleanup needed")
-        else:
-            logger.info(f"Keeping downloaded file in {artifacts_path}")
     
     return 0
 
