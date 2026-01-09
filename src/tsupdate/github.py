@@ -110,13 +110,16 @@ def _create_github_client():
     Create and configure a GitHub client instance.
     
     Uses module-level GitHub token if available. Validates token by checking rate limit.
+    Retries are disabled to prevent blocking signal handling when rate limited.
     
     Returns:
         Configured Github instance
     """
     github_token = get_github_token()
+    # Disable retries to prevent blocking signal handling when rate limited
+    # This allows the daemon to respond to SIGTERM/SIGINT immediately
     if github_token:
-        g = Github(github_token)
+        g = Github(github_token, retry=0)
         logger.debug("Using GitHub token for authentication")
         # Verify token is valid by checking rate limit
         try:
@@ -130,7 +133,7 @@ def _create_github_client():
         except Exception as e:
             logger.warning(f"Could not verify GitHub token: {e}")
     else:
-        g = Github()
+        g = Github(retry=0)
         logger.debug("Using unauthenticated GitHub API access")
     return g
 
