@@ -135,8 +135,8 @@ def sync_root_partitions(source: Optional[Path] = None, destination: Optional[Pa
     """
     Sync root partitions using rsync.
     
-    Syncs source to destination using rsync with archive mode
-    and deletion of extra files.
+    Syncs source to destination using rsync with archive mode,
+    content checksum comparison, and deletion of extra files.
     
     Args:
         source: Source path to sync from (defaults to ROOT_RO)
@@ -155,8 +155,8 @@ def sync_root_partitions(source: Optional[Path] = None, destination: Optional[Pa
     
     logger.debug(f"Syncing from {source_str} to {destination_str}")
     
-    # Build rsync command
-    rsync_cmd = ["rsync", "-a", "-h", "--stats", "--delete"]
+    # Build rsync command (--checksum: compare by content, not only size+mtime)
+    rsync_cmd = ["rsync", "-a", "-h", "--stats", "--delete", "--checksum"]
     
     # Add --verbose if debug logging is enabled
     if logger.isEnabledFor(logging.DEBUG):

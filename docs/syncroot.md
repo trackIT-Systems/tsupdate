@@ -25,7 +25,7 @@ This module handles mounting/unmounting partitions and syncing filesystems betwe
 
 **`mount_context(device, mount_point)`**: Context manager for automatic mount/unmount.
 
-**`sync_root_partitions(source, destination)`**: Sync filesystems using rsync with archive mode and deletion.
+**`sync_root_partitions(source, destination)`**: Sync filesystems using rsync with archive mode, checksum comparison, and deletion.
 
 ### Command Functions
 
@@ -42,6 +42,7 @@ The sync operation uses rsync with the following options:
 - **`-h`** (human-readable) - Human-readable progress
 - **`--stats`** - Show transfer statistics
 - **`--delete`** - Delete files from destination that don't exist in source
+- **`--checksum`** - Compare files by whole-file checksum (not only size and modification time)
 - **`--itemize-changes`** - Show detailed changes (when verbose mode is enabled)
 
 ## Restrictions
