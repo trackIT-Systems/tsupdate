@@ -38,6 +38,10 @@ persist_timeout: 600
 # Default: 60 (1 minute)
 update_countdown: 60
 
+# Maximum wall-clock time (seconds) for rsync during partition sync and batch apply
+# Default: 3600 (1 hour). Use 0 for no limit.
+# rsync_timeout: 3600
+
 # Regular behavior (applies outside maintenance window or when no maintenance schedule)
 # What to do when checking for updates
 # Valid values: nothing, check, download, apply

@@ -252,6 +252,13 @@ def main():
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser_syncroot.add_argument(
+        "--rsync-timeout",
+        type=int,
+        default=None,
+        metavar="SEC",
+        help="Maximum wall-clock seconds for rsync (default: 3600; 0 = unlimited)",
+    )
     
     # mount command
     parser_mount = subparsers.add_parser(
@@ -303,6 +310,13 @@ def main():
         "-k",
         action="store_true",
         help="Keep downloaded file after apply",
+    )
+    parser_apply.add_argument(
+        "--rsync-timeout",
+        type=int,
+        default=None,
+        metavar="SEC",
+        help="Maximum wall-clock seconds for rsync (default: 3600; 0 = unlimited)",
     )
     
     # restore command
@@ -447,7 +461,7 @@ def main():
     
     # Handle syncroot command
     if args.command == "syncroot":
-        exit_code = execute_syncroot()
+        exit_code = execute_syncroot(rsync_timeout_sec=args.rsync_timeout)
         sys.exit(exit_code)
     
     # Handle mount command
@@ -462,7 +476,11 @@ def main():
     
     # Handle apply command
     if args.command == "apply":
-        exit_code = execute_apply(args.update_file, keep_download=args.keep_download)
+        exit_code = execute_apply(
+            args.update_file,
+            keep_download=args.keep_download,
+            rsync_timeout_sec=args.rsync_timeout,
+        )
         sys.exit(exit_code)
     
     # Handle restore command

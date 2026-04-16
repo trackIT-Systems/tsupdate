@@ -14,6 +14,34 @@ logger = logging.getLogger(__name__)
 # Artifacts directory for downloaded files
 ARTIFACTS_DIR = Path("/data/tsupdate")
 
+# Default wall-clock limit for rsync invocations (syncroot, apply read-batch)
+DEFAULT_RSYNC_TIMEOUT_SEC = 3600
+
+
+def resolve_rsync_timeout_seconds(rsync_timeout_sec: Optional[int]) -> Optional[float]:
+    """
+    Convert configured or CLI ``rsync_timeout`` (seconds) to a value for ``subprocess.run(timeout=...)``.
+
+    Args:
+        rsync_timeout_sec: ``None`` uses ``DEFAULT_RSYNC_TIMEOUT_SEC`` (3600).
+            ``0`` means no limit (returns ``None``). Positive values are used as-is.
+
+    Returns:
+        Seconds as float for subprocess, or ``None`` for no timeout.
+    """
+    if rsync_timeout_sec is None:
+        return float(DEFAULT_RSYNC_TIMEOUT_SEC)
+    if rsync_timeout_sec == 0:
+        return None
+    if rsync_timeout_sec < 0:
+        logger.warning(
+            "Invalid rsync_timeout %s (must be >= 0), using default %s seconds",
+            rsync_timeout_sec,
+            DEFAULT_RSYNC_TIMEOUT_SEC,
+        )
+        return float(DEFAULT_RSYNC_TIMEOUT_SEC)
+    return float(rsync_timeout_sec)
+
 
 def safe_cleanup(path: Path) -> None:
     """

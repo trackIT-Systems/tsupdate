@@ -9,6 +9,7 @@ from typing import Optional
 
 from tsupdate.status import get_inactive_partition
 from tsupdate.tryboot import is_regular_boot, is_tryboot_persisted
+from tsupdate.utils import resolve_rsync_timeout_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +132,11 @@ def mount_context(device: str, mount_point: Path):
             logger.warning(f"Could not unmount {mount_point}")
 
 
-def sync_root_partitions(source: Optional[Path] = None, destination: Optional[Path] = None) -> bool:
+def sync_root_partitions(
+    source: Optional[Path] = None,
+    destination: Optional[Path] = None,
+    rsync_timeout_sec: Optional[int] = None,
+) -> bool:
     """
     Sync root partitions using rsync.
     
@@ -141,6 +146,7 @@ def sync_root_partitions(source: Optional[Path] = None, destination: Optional[Pa
     Args:
         source: Source path to sync from (defaults to ROOT_RO)
         destination: Destination path to sync to (defaults to ROOT_UP)
+        rsync_timeout_sec: Wall-clock limit in seconds (None = default 3600; 0 = unlimited)
     
     Returns:
         True if successful, False otherwise
@@ -164,13 +170,24 @@ def sync_root_partitions(source: Optional[Path] = None, destination: Optional[Pa
     
     rsync_cmd.extend([source_str, destination_str])
     
+    timeout = resolve_rsync_timeout_seconds(rsync_timeout_sec)
     try:
-        result = subprocess.run(
+        subprocess.run(
             rsync_cmd,
             check=True,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
         )
         logger.debug("Rsync completed successfully")
         return True
+    except subprocess.TimeoutExpired:
+        limit = f"{int(timeout)}s" if timeout is not None else "unlimited"
+        logger.error(
+            "rsync timed out (limit was %s); increase rsync_timeout in tsupdate.yml "
+            "or pass --rsync-timeout (0 = no limit)",
+            limit,
+        )
+        return False
     except subprocess.CalledProcessError as e:
         logger.error(f"rsync failed: {e}")
         return False
@@ -179,9 +196,12 @@ def sync_root_partitions(source: Optional[Path] = None, destination: Optional[Pa
         return False
 
 
-def execute_syncroot() -> int:
+def execute_syncroot(rsync_timeout_sec: Optional[int] = None) -> int:
     """
     Execute the syncroot process.
+    
+    Args:
+        rsync_timeout_sec: Wall-clock limit for rsync in seconds (None = default 3600; 0 = unlimited)
     
     Returns:
         Exit code (0 for success, non-zero for failure)
@@ -209,7 +229,7 @@ def execute_syncroot() -> int:
             logger.info(f"Mounted {device} to {mount_point}")
             
             logger.info(f"Syncing {ROOT_RO} to {mount_point}...")
-            if not sync_root_partitions():
+            if not sync_root_partitions(rsync_timeout_sec=rsync_timeout_sec):
                 return 1
             
             logger.info("Sync completed successfully")

@@ -28,7 +28,7 @@ from tsupdate.schedule import (
 from tsupdate.status import is_tryboot_active, read_booted_os_release
 from tsupdate.syncroot import execute_syncroot
 from tsupdate.tryboot import execute_tryboot, persist_boot_configuration
-from tsupdate.utils import ARTIFACTS_DIR, ensure_file
+from tsupdate.utils import ARTIFACTS_DIR, DEFAULT_RSYNC_TIMEOUT_SEC, ensure_file
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,7 @@ def load_config(config_path: Path) -> dict:
         "max_releases": 5,
         "persist_timeout": 600,  # 10 minutes
         "update_countdown": 60,  # 1 minute
+        "rsync_timeout": DEFAULT_RSYNC_TIMEOUT_SEC,  # wall-clock limit for syncroot/apply rsync (0 = unlimited)
         "do": "check",  # Regular behavior: what to do (nothing, check, download, apply)
         "maintenance_check_interval": None,  # Maintenance behavior: check interval (None = use check_interval)
         "maintenance_do": None,  # Maintenance behavior: what to do (None = use do, or "apply" if maintenance schedule exists)
@@ -143,6 +144,25 @@ def load_config(config_path: Path) -> dict:
                 f"Setting to {min_interval}s"
             )
             config["maintenance_check_interval"] = min_interval
+        
+        rsync_timeout = config.get("rsync_timeout", DEFAULT_RSYNC_TIMEOUT_SEC)
+        if rsync_timeout is None:
+            rsync_timeout = DEFAULT_RSYNC_TIMEOUT_SEC
+        if isinstance(rsync_timeout, bool) or not isinstance(rsync_timeout, int):
+            logger.error(
+                "rsync_timeout must be an integer in seconds (got %s: %r)",
+                type(rsync_timeout).__name__,
+                rsync_timeout,
+            )
+            sys.exit(1)
+        if rsync_timeout < 0:
+            logger.warning(
+                "rsync_timeout (%s) is negative; using default %s seconds",
+                rsync_timeout,
+                DEFAULT_RSYNC_TIMEOUT_SEC,
+            )
+            rsync_timeout = DEFAULT_RSYNC_TIMEOUT_SEC
+        config["rsync_timeout"] = rsync_timeout
         
         logger.info(f"Loaded configuration from {config_path}")
         logger.debug(f"Configuration: {config}")
@@ -486,7 +506,8 @@ def sync_and_apply_update(update_file_path: Path, config: dict) -> bool:
         logger.info("Preparing inactive partition...")
         notify_users("Preparing system update - syncing partitions...")
         
-        syncroot_result = execute_syncroot()
+        rsync_timeout = config.get("rsync_timeout", DEFAULT_RSYNC_TIMEOUT_SEC)
+        syncroot_result = execute_syncroot(rsync_timeout_sec=rsync_timeout)
         if syncroot_result != 0:
             logger.error("Failed to sync root partition - aborting update")
             notify_users("Update failed: could not sync partitions")
@@ -499,7 +520,11 @@ def sync_and_apply_update(update_file_path: Path, config: dict) -> bool:
         notify_users(f"Applying update: {update_file_path.name}")
         
         # Use file path directly (execute_apply will handle it)
-        apply_result = execute_apply(str(update_file_path), keep_download=False)
+        apply_result = execute_apply(
+            str(update_file_path),
+            keep_download=False,
+            rsync_timeout_sec=rsync_timeout,
+        )
         if apply_result != 0:
             logger.error("Failed to apply update - aborting")
             notify_users("Update failed: could not apply update")

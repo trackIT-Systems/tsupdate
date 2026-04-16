@@ -5,7 +5,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 import tarfile
 import tempfile
 from pathlib import Path
@@ -18,7 +17,7 @@ from tsupdate.syncroot import (
     mount_context,
     ROOT_UP,
 )
-from tsupdate.utils import ARTIFACTS_DIR, ensure_file
+from tsupdate.utils import ARTIFACTS_DIR, ensure_file, resolve_rsync_timeout_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +259,13 @@ def check_version_compatibility(base_pretty_name: str, target_os_release_path: P
     return (True, found_pretty_name)
 
 
-def apply_rsync_batch(batch_file: Path, target_dir: Path, rsync_options: List[str], filter_rules: Optional[str] = None) -> int:
+def apply_rsync_batch(
+    batch_file: Path,
+    target_dir: Path,
+    rsync_options: List[str],
+    filter_rules: Optional[str] = None,
+    rsync_timeout_sec: Optional[int] = None,
+) -> int:
     """
     Apply rsync batch file to target directory.
     
@@ -269,6 +274,7 @@ def apply_rsync_batch(batch_file: Path, target_dir: Path, rsync_options: List[st
         target_dir: Target directory (mounted inactive partition)
         rsync_options: List of rsync options from batch.sh
         filter_rules: Optional filter rules to provide via stdin (only used if --filter option is present)
+        rsync_timeout_sec: Wall-clock limit in seconds (None = default 3600; 0 = unlimited)
         
     Returns:
         Rsync exit code
@@ -334,14 +340,25 @@ def apply_rsync_batch(batch_file: Path, target_dir: Path, rsync_options: List[st
     else:
         logger.info("Starting rsync batch transfer (this may take a while)...")
     
+    timeout = resolve_rsync_timeout_seconds(rsync_timeout_sec)
+    run_kw = {"check": False, "timeout": timeout}
+    if has_filter_option:
+        run_kw["input"] = stdin_input if stdin_input is not None else b""
+    else:
+        run_kw["stdin"] = subprocess.DEVNULL
+    
     try:
-        result = subprocess.run(
-            rsync_cmd,
-            input=stdin_input,
-            check=False,  # Don't raise exception, return exit code
-        )
+        result = subprocess.run(rsync_cmd, **run_kw)
         logger.debug(f"Rsync command completed with exit code: {result.returncode}")
         return result.returncode
+    except subprocess.TimeoutExpired:
+        limit = f"{int(timeout)}s" if timeout is not None else "unlimited"
+        logger.error(
+            "rsync timed out (limit was %s); increase rsync_timeout in tsupdate.yml "
+            "or pass --rsync-timeout (0 = no limit)",
+            limit,
+        )
+        return 124
     except FileNotFoundError:
         logger.error("rsync command not found")
         return 1
@@ -365,14 +382,19 @@ def handle_rsync_exit_code(exit_code: int) -> str:
         1: "Error: Syntax or usage error",
         2: "Error: Protocol incompatibility",
         11: "Error: File I/O error",
-        23: "Warning: Partial transfer due to error",
-        24: "Warning: Partial transfer due to vanished source files",
+        23: "Error: Partial transfer or verification failure (inactive tree may not match update base; re-run syncroot)",
+        24: "Error: Partial transfer due to vanished source files",
+        124: "Error: rsync exceeded time limit",
     }
     
     return messages.get(exit_code, f"Error: Update failed with exit code {exit_code}")
 
 
-def execute_apply(update_source: str, keep_download: bool = False) -> int:
+def execute_apply(
+    update_source: str,
+    keep_download: bool = False,
+    rsync_timeout_sec: Optional[int] = None,
+) -> int:
     """
     Execute the apply update process.
     
@@ -381,6 +403,7 @@ def execute_apply(update_source: str, keep_download: bool = False) -> int:
     Args:
         update_source: URL or local file path to update tar archive
         keep_download: If True, keep downloaded file after apply
+        rsync_timeout_sec: Wall-clock limit for rsync in seconds (None = default 3600; 0 = unlimited)
         
     Returns:
         Exit code (0 for success, non-zero for failure)
@@ -517,20 +540,28 @@ def execute_apply(update_source: str, keep_download: bool = False) -> int:
                 logger.debug(f"About to call apply_rsync_batch with batch_file={batch_file}, target_dir={mount_point}")
                 
                 # Apply rsync batch
-                exit_code = apply_rsync_batch(batch_file, mount_point, rsync_options, filter_rules)
+                exit_code = apply_rsync_batch(
+                    batch_file,
+                    mount_point,
+                    rsync_options,
+                    filter_rules,
+                    rsync_timeout_sec=rsync_timeout_sec,
+                )
                 
                 logger.debug(f"apply_rsync_batch returned with exit code: {exit_code}")
                 
                 message = handle_rsync_exit_code(exit_code)
                 if exit_code == 0:
                     logger.info(message)
-                elif exit_code in (23, 24):
-                    logger.warning(message)
                 else:
                     logger.error(message)
+                    if exit_code in (23, 24):
+                        logger.error(
+                            "If PRETTY_NAME matched but rsync still failed, the inactive partition "
+                            "is probably not a byte-accurate clone of the running root; run "
+                            "`tsupdate syncroot` (with checksum sync) or restore the partition."
+                        )
                     return exit_code
-                
-                return 0
         except RuntimeError as e:
             logger.error(str(e))
             return 1
