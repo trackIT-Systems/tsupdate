@@ -1,6 +1,8 @@
 """Tryboot tool for switching boot partitions."""
 
+from contextlib import contextmanager
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -18,6 +20,51 @@ CMDLINE_FILE = BOOT_DIR / "cmdline.txt"
 TRYLINE_FILE = BOOT_DIR / "tryline.txt"
 CONFIG_FILE = BOOT_DIR / "config.txt"
 TRYBOOT_CONFIG_FILE = BOOT_DIR / "tryboot.txt"
+
+
+@contextmanager
+def open_preserve_times(
+    path: Path,
+    mode: str = "r",
+    encoding: Optional[str] = None,
+    preserve_atime: bool = True,
+    preserve_mtime: bool = True,
+):
+    """
+    Context manager that wraps open() and optionally preserves the file's atime and/or mtime.
+    
+    If preserve_atime or preserve_mtime is True and the file exists, the original
+    timestamps are recorded and restored after the file is closed.
+    """
+    old_atime = None
+    old_mtime = None
+    
+    if (preserve_atime or preserve_mtime) and path.exists():
+        try:
+            stat = path.stat()
+            old_atime = stat.st_atime
+            old_mtime = stat.st_mtime
+        except OSError as e:
+            logger.warning(f"Could not read times for {path}: {e}")
+            
+    try:
+        with open(path, mode, encoding=encoding) as f:
+            yield f
+    finally:
+        if (old_atime is not None or old_mtime is not None) and path.exists():
+            try:
+                if not preserve_atime or not preserve_mtime:
+                    current_stat = path.stat()
+                    target_atime = old_atime if preserve_atime else current_stat.st_atime
+                    target_mtime = old_mtime if preserve_mtime else current_stat.st_mtime
+                else:
+                    target_atime = old_atime
+                    target_mtime = old_mtime
+                
+                os.utime(path, (target_atime, target_mtime))
+                logger.debug(f"Restored times for {path}: atime={target_atime}, mtime={target_mtime}")
+            except OSError as e:
+                logger.warning(f"Could not restore times for {path}: {e}")
 
 
 def is_regular_boot() -> bool:
@@ -251,7 +298,7 @@ def persist_boot_configuration() -> bool:
         return False
     
     try:
-        with open(CMDLINE_FILE, "w", encoding="utf-8") as f:
+        with open_preserve_times(CMDLINE_FILE, "w", encoding="utf-8", preserve_atime=True, preserve_mtime=True) as f:
             f.write(tryline_content)
             f.write("\n")
         logger.debug(f"Copied {TRYLINE_FILE} to {CMDLINE_FILE}")
@@ -358,7 +405,7 @@ def rollback_tryboot(reboot: bool = True) -> int:
     
     # Write restored cmdline.txt
     try:
-        with open(CMDLINE_FILE, "w", encoding="utf-8") as f:
+        with open_preserve_times(CMDLINE_FILE, "w", encoding="utf-8", preserve_atime=True, preserve_mtime=True) as f:
             f.write(modified_cmdline)
             f.write("\n")
         logger.info(f"Restored {CMDLINE_FILE} to point to {previous_label} (p{previous_partition_num})")
