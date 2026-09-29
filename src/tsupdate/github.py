@@ -11,6 +11,12 @@ from github.GithubException import GithubException
 
 logger = logging.getLogger(__name__)
 
+# tsupdate runs as root and applies whatever update source it's pointed at, so the
+# accepted source is pinned to this GitHub org in code (not configurable via
+# tsupdate.yml/CLI/SUPPORT_URL) rather than trusted from any of those inputs.
+# Compared case-insensitively everywhere below.
+ALLOWED_OWNER = "trackIT-Systems"
+
 # Module-level GitHub token (loaded once at program start)
 _github_token: Optional[str] = None
 
@@ -85,24 +91,37 @@ def parse_github_repo_url(support_url: str) -> Optional[Tuple[str, str]]:
         support_url: SUPPORT_URL from os-release
         
     Returns:
-        Tuple of (owner, repo) or None if parsing fails
+        Tuple of (owner, repo) or None if parsing fails, or if the owner is
+        not ALLOWED_OWNER.
     """
     if not support_url:
         return None
-    
-    # Pattern to match GitHub URLs
-    # Matches: https://github.com/owner/repo or https://github.com/owner/repo/...
-    pattern = r'https?://github\.com/([^/]+)/([^/?#]+)'
-    match = re.search(pattern, support_url)
-    
-    if match:
-        owner = match.group(1)
-        repo = match.group(2)
-        logger.debug(f"Parsed GitHub repo: {owner}/{repo} from {support_url}")
-        return (owner, repo)
-    
-    logger.warning(f"Could not parse GitHub repo URL from: {support_url}")
-    return None
+
+    # Fully anchored (not re.search) so this can't match a GitHub URL embedded
+    # anywhere inside a longer, attacker-controlled string (e.g.
+    # "https://evil.example/?u=https://github.com/trackIT-Systems/foo", or
+    # "https://github.com.evil.example/..."). https only - no plain http.
+    # A trailing path (e.g. /issues, /releases) is still allowed after
+    # owner/repo, matching the documented formats this function accepts.
+    pattern = r'^https://github\.com/([^/]+)/([^/?#]+)(?:/[^?#]*)?(?:[?#].*)?$'
+    match = re.fullmatch(pattern, support_url.strip())
+
+    if not match:
+        logger.warning(f"Could not parse GitHub repo URL from: {support_url}")
+        return None
+
+    owner = match.group(1)
+    repo = match.group(2)
+
+    if owner.lower() != ALLOWED_OWNER.lower():
+        logger.warning(
+            f"Rejecting update source from disallowed owner '{owner}' "
+            f"(only '{ALLOWED_OWNER}' is accepted): {support_url}"
+        )
+        return None
+
+    logger.debug(f"Parsed GitHub repo: {owner}/{repo} from {support_url}")
+    return (owner, repo)
 
 
 def _create_github_client():
@@ -183,7 +202,11 @@ def _get_assets_from_release(release) -> List[dict]:
                 asset_info = {
                     'name': asset_data.get('name', ''),
                     'size': asset_data.get('size', 0),
-                    'url': asset_data.get('browser_download_url', '')
+                    'url': asset_data.get('browser_download_url', ''),
+                    # GitHub's release-assets API started returning a content
+                    # digest (e.g. "sha256:<hex>") on newer API versions; not
+                    # guaranteed present depending on API version/asset age.
+                    'digest': asset_data.get('digest'),
                 }
                 # Include asset_id if available
                 if 'id' in asset_data:
@@ -193,7 +216,7 @@ def _get_assets_from_release(release) -> List[dict]:
             return assets
     except (AttributeError, KeyError, TypeError) as e:
         logger.debug(f"Could not access raw_data, falling back to API call: {e}")
-    
+
     # Fallback: use API call
     try:
         for asset in release.get_assets():
@@ -201,7 +224,8 @@ def _get_assets_from_release(release) -> List[dict]:
                 'name': asset.name,
                 'size': asset.size,
                 'url': asset.browser_download_url,
-                'id': asset.id
+                'id': asset.id,
+                'digest': getattr(asset, 'digest', None),
             }
             assets.append(asset_info)
         logger.debug(f"Found {len(assets)} assets from API call")
@@ -223,59 +247,76 @@ def parse_github_release_url(url: str) -> Optional[Tuple[str, str, Optional[str]
         url: GitHub release URL
         
     Returns:
-        Tuple of (owner, repo, tag, asset_name) or None if parsing fails
+        Tuple of (owner, repo, tag, asset_name) or None if parsing fails,
+        or if the owner is not ALLOWED_OWNER.
         tag and asset_name may be None if not found in URL
     """
     if not url:
         return None
-    
+
+    url = url.strip()
+
+    # Both patterns are fully anchored (re.fullmatch) and https-only, for the
+    # same reason as parse_github_repo_url: an unanchored/http-tolerant match
+    # could be tricked by a URL that merely contains a GitHub-looking segment.
     # Pattern for release download URL: /releases/download/tag/asset-name
-    download_pattern = r'https?://github\.com/([^/]+)/([^/]+)/releases/download/([^/]+)/(.+)'
-    match = re.match(download_pattern, url)
+    download_pattern = r'^https://github\.com/([^/]+)/([^/]+)/releases/download/([^/]+)/([^/?#]+)$'
+    match = re.fullmatch(download_pattern, url)
     if match:
-        owner = match.group(1)
-        repo = match.group(2)
-        tag = match.group(3)
-        asset_name = match.group(4)
+        owner, repo, tag, asset_name = match.groups()
+        if owner.lower() != ALLOWED_OWNER.lower():
+            logger.warning(
+                f"Rejecting release URL from disallowed owner '{owner}' "
+                f"(only '{ALLOWED_OWNER}' is accepted): {url}"
+            )
+            return None
         logger.debug(f"Parsed GitHub release download URL: {owner}/{repo} tag={tag} asset={asset_name}")
         return (owner, repo, tag, asset_name)
-    
+
     # Pattern for release page URL: /releases/tag/tag-name
-    tag_pattern = r'https?://github\.com/([^/]+)/([^/]+)/releases/tag/([^/?#]+)'
-    match = re.match(tag_pattern, url)
+    tag_pattern = r'^https://github\.com/([^/]+)/([^/]+)/releases/tag/([^/?#]+)$'
+    match = re.fullmatch(tag_pattern, url)
     if match:
-        owner = match.group(1)
-        repo = match.group(2)
-        tag = match.group(3)
+        owner, repo, tag = match.groups()
+        if owner.lower() != ALLOWED_OWNER.lower():
+            logger.warning(
+                f"Rejecting release URL from disallowed owner '{owner}' "
+                f"(only '{ALLOWED_OWNER}' is accepted): {url}"
+            )
+            return None
         logger.debug(f"Parsed GitHub release tag URL: {owner}/{repo} tag={tag}")
         return (owner, repo, tag, None)
-    
+
     logger.debug(f"Could not parse GitHub release URL: {url}")
     return None
 
 
-def resolve_github_release_url(url: str) -> Optional[str]:
+def resolve_github_release_asset(url: str) -> Optional[dict]:
     """
-    Resolve GitHub release URL to direct download URL using GitHub API.
-    
+    Resolve a GitHub release URL to the actual asset, via the GitHub API.
+
     Takes a GitHub release URL and uses PyGithub to fetch the release and
-    return the API endpoint URL for the asset. Supports authentication
-    for private repositories (reads GH_TOKEN from environment variable).
-    
+    find the matching asset. Supports authentication for private
+    repositories (reads GH_TOKEN from environment variable).
+
     Args:
         url: GitHub release URL (download or tag URL)
-        
+
     Returns:
-        API endpoint URL for authenticated download or None on error
+        {"url": <download url>, "size": <int or None>, "digest": <str or None>}
+        or None on error. `size`/`digest` come from the GitHub API's asset
+        metadata (whichever of those fields the API response for this asset
+        happened to include) and are used by ensure_file() to verify a
+        cached/resumed file before reusing it without re-downloading.
     """
     # Parse the URL
     parsed = parse_github_release_url(url)
     if not parsed:
         logger.error(f"Invalid GitHub release URL format: {url}")
         return None
-    
+
     owner, repo, tag, asset_name = parsed
-    
+
     # If URL already contains asset name, we can construct the download URL directly
     # But we still need to verify it exists and get authenticated URL if needed
     if tag and asset_name:
@@ -285,7 +326,7 @@ def resolve_github_release_url(url: str) -> Optional[str]:
             # Create GitHub client
             g = _create_github_client()
             repository = g.get_repo(f"{owner}/{repo}")
-            
+
             # Get release by tag
             try:
                 release = repository.get_release(tag)
@@ -295,11 +336,12 @@ def resolve_github_release_url(url: str) -> Optional[str]:
                 else:
                     logger.error(f"Error fetching release: {e.status} {e.data}")
                 return None
-            
+
             # Find the asset by name
             assets = _get_assets_from_release(release)
             for asset_info in assets:
                 if asset_info['name'] == asset_name:
+                    metadata = {"size": asset_info.get("size"), "digest": asset_info.get("digest")}
                     # Prefer browser_download_url (works for public repos, simpler)
                     # Only use API endpoint if we have a token (for private repos)
                     github_token = get_github_token()
@@ -307,36 +349,36 @@ def resolve_github_release_url(url: str) -> Optional[str]:
                         # For private repos with auth, use API endpoint
                         api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_info['id']}"
                         logger.debug(f"Found asset: {asset_name} -> API endpoint (authenticated): {api_url}")
-                        return api_url
+                        return {"url": api_url, **metadata}
                     else:
                         # For public repos or when no token, use browser_download_url
                         browser_url = asset_info.get('url', '')
                         if browser_url:
                             logger.debug(f"Found asset: {asset_name} -> browser_download_url: {browser_url}")
-                            return browser_url
+                            return {"url": browser_url, **metadata}
                         elif 'id' in asset_info:
                             # Fallback to API endpoint if browser_url not available
                             api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_info['id']}"
                             logger.debug(f"Found asset: {asset_name} -> API endpoint (fallback): {api_url}")
-                            return api_url
-            
+                            return {"url": api_url, **metadata}
+
             logger.error(f"Asset '{asset_name}' not found in release '{tag}'")
             return None
-            
+
         except GithubException as e:
             _handle_github_exception(e, owner, repo)
             return None
         except Exception as e:
             logger.error(f"Unexpected error resolving GitHub release URL: {e}")
             return None
-    
+
     # If we only have tag (no asset name), we need to find the asset
     # This is less common but we'll handle it
     if tag and not asset_name:
         logger.error("Cannot resolve GitHub release URL: asset name required")
         logger.error("Use format: https://github.com/owner/repo/releases/download/tag/asset-name")
         return None
-    
+
     return None
 
 

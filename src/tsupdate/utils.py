@@ -1,18 +1,81 @@
 """Utility functions for file downloads and management."""
 
+import hashlib
 import logging
+import os
 from pathlib import Path
 from typing import Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 
-from tsupdate.github import parse_github_release_url, resolve_github_release_url, get_github_token
+from tsupdate.github import ALLOWED_OWNER, parse_github_release_url, resolve_github_release_asset, get_github_token
 
 logger = logging.getLogger(__name__)
 
 
 # Artifacts directory for downloaded files
 ARTIFACTS_DIR = Path("/data/tsupdate")
+
+# Hosts a download is ever allowed to actually fetch bytes from. github.com and
+# api.github.com are where a request is first made; GitHub redirects asset
+# downloads to one of the *.githubusercontent.com CDN hosts, which download_file()
+# checks the final response URL against after following redirects.
+_ALLOWED_API_HOSTS = frozenset({"github.com", "api.github.com"})
+_ALLOWED_ASSET_HOSTS = frozenset({
+    "github.com",
+    "api.github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+})
+
+
+def is_allowed_source_url(url: str) -> bool:
+    """Whether `url` is allowed as a tsupdate download/resolve source.
+
+    This is the actual enforcement point for the trackIT-Systems org pin: it
+    is checked in ensure_file() for *every* remote source, not only ones that
+    happen to match the GitHub-release-URL shape that parse_github_release_url
+    understands - a URL that doesn't match that shape (e.g. an arbitrary
+    non-GitHub host, or a github.com URL to some other repo/org) would
+    otherwise fall through to being downloaded as-is.
+
+    Requires https, host github.com or api.github.com, and the owner segment
+    of the path (github.com/<owner>/... or api.github.com/repos/<owner>/...)
+    to match ALLOWED_OWNER case-insensitively.
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+
+    if parsed.scheme != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    if host not in _ALLOWED_API_HOSTS:
+        return False
+
+    path_parts = [p for p in parsed.path.split("/") if p]
+    if host == "github.com":
+        owner = path_parts[0] if path_parts else ""
+    else:  # api.github.com
+        # Expected shape: /repos/<owner>/<repo>/...
+        owner = path_parts[1] if len(path_parts) >= 2 and path_parts[0] == "repos" else ""
+
+    return owner.lower() == ALLOWED_OWNER.lower()
+
+
+def _is_allowed_asset_response_host(url: str) -> bool:
+    """Whether a (possibly redirected-to) response URL is a legitimate GitHub
+    asset host. Used after following redirects in download_file(), since a
+    malicious or misbehaving server on an otherwise-allowed request URL could
+    redirect the actual content fetch elsewhere.
+    """
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in _ALLOWED_ASSET_HOSTS
 
 # Default wall-clock limit for rsync invocations (syncroot, apply read-batch)
 DEFAULT_RSYNC_TIMEOUT_SEC = 3600
@@ -60,7 +123,58 @@ def safe_cleanup(path: Path) -> None:
         pass  # Ignore cleanup errors
 
 
-def download_file(url: str, output_path: Path) -> bool:
+def _sha256_file(path: Path) -> str:
+    """Compute the sha256 hex digest of a file, streaming it in chunks."""
+    hasher = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _verify_file(path: Path, expected_size: Optional[int], expected_digest: Optional[str]) -> Tuple[bool, str]:
+    """Verify a downloaded/cached file against whatever metadata the GitHub
+    API gave us for the asset it's supposed to be.
+
+    Digest is the strong check when available (GitHub's release-assets API
+    returns one as "sha256:<hex>" on newer API versions, but not always -
+    older assets and some API responses omit it). When there's no digest,
+    fall back to a size comparison, which is weaker (doesn't rule out a
+    same-size tampered file) but still catches a truncated/wrong file. When
+    neither is available at all, we cannot verify - and given this exists
+    specifically to stop a pre-placed or tampered file in the world-writable
+    /data/tsupdate cache from being silently trusted, "cannot verify" must
+    mean "reject", not "assume it's fine".
+
+    Returns (ok, reason) - reason is a human-readable explanation either way,
+    used for logging.
+    """
+    actual_size = path.stat().st_size
+
+    if expected_digest:
+        algo, _, expected_hex = expected_digest.partition(":")
+        algo = algo.lower()
+        if algo == "sha256":
+            actual_hex = _sha256_file(path)
+            if actual_hex.lower() == expected_hex.lower():
+                return True, "sha256 digest matches"
+            return False, f"sha256 digest mismatch (expected {expected_hex}, got {actual_hex})"
+        logger.debug(f"Unsupported digest algorithm '{algo}', falling back to size check")
+
+    if expected_size is not None:
+        if actual_size == expected_size:
+            return True, "size matches (no digest available to check)"
+        return False, f"size mismatch (expected {expected_size} bytes, got {actual_size} bytes)"
+
+    return False, "no digest or size available from the API to verify against"
+
+
+def download_file(
+    url: str,
+    output_path: Path,
+    expected_size: Optional[int] = None,
+    expected_digest: Optional[str] = None,
+) -> bool:
     """
     Download file from URL with resumable download support.
     
@@ -73,7 +187,12 @@ def download_file(url: str, output_path: Path) -> bool:
     Args:
         url: URL to download from
         output_path: Path where to save the downloaded file
-        
+        expected_size: If known (from the GitHub API), the asset's size in
+            bytes - the completed download is checked against this (and,
+            if available, expected_digest) before being kept.
+        expected_digest: If known, the asset's content digest as returned by
+            the GitHub API (e.g. "sha256:<hex>").
+
     Returns:
         True if successful, False otherwise
     """
@@ -145,7 +264,18 @@ def download_file(url: str, output_path: Path) -> bool:
         
         # Check for errors
         response.raise_for_status()
-        
+
+        # requests follows redirects by default, so the actual bytes could come
+        # from somewhere other than the URL we requested (that's expected for
+        # GitHub asset downloads, which redirect to a *.githubusercontent.com
+        # CDN host) - but verify the final host is still one we trust, so a
+        # request that started at github.com/api.github.com can't be redirected
+        # to an arbitrary attacker-controlled host.
+        if not _is_allowed_asset_response_host(response.url):
+            logger.error(f"Refusing download: response URL is not a trusted GitHub asset host: {response.url}")
+            response.close()
+            return False
+
         # Get total size
         total_size = None
         if 'Content-Length' in response.headers:
@@ -179,7 +309,20 @@ def download_file(url: str, output_path: Path) -> bool:
             logger.warning(f"Download incomplete: {downloaded}/{total_size} bytes")
             # Keep temp file for resume on next attempt
             return False
-        
+
+        # Verify the completed file against known-good metadata before trusting
+        # it, whether this was a fresh download or a resumed one - a resume
+        # picks up appending to whatever was already in the .tmp file, so this
+        # also catches a tampered/corrupt partial file that "completes" to the
+        # wrong content.
+        if expected_size is not None or expected_digest is not None:
+            ok, reason = _verify_file(temp_path, expected_size, expected_digest)
+            if not ok:
+                logger.error(f"Downloaded file failed verification, discarding: {reason}")
+                safe_cleanup(temp_path)
+                return False
+            logger.debug(f"Downloaded file verified: {reason}")
+
         # Rename temporary file to final path (atomic operation)
         temp_path.rename(output_path)
         if resume_from > 0:
@@ -225,41 +368,52 @@ def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Opt
         # Local file path
         logger.info(f"Using local file: {source}")
         return (source_path, True)
-    
+
+    # Reject any remote source that isn't a trackIT-Systems GitHub URL, before
+    # doing anything else with it (network access, GitHub API resolution, or
+    # treating it as a download URL). This is the actual enforcement point for
+    # the org pin: parse_github_repo_url/parse_github_release_url reject bad
+    # owners for the paths that call them, but a source that doesn't even match
+    # the GitHub-release-URL shape below would otherwise fall through to the
+    # generic "download whatever URL we were given" path untouched.
+    if not is_allowed_source_url(source):
+        logger.error(
+            f"Refusing update source (not a github.com/api.github.com URL for "
+            f"'{ALLOWED_OWNER}'): {source}"
+        )
+        return (None, False)
+
     # Check if this is a GitHub release URL
     download_url = source
     asset_name = None
+    asset_size: Optional[int] = None
+    asset_digest: Optional[str] = None
     if source.startswith("https://github.com/") and "/releases/" in source:
         logger.debug(f"Detected GitHub release URL: {source}")
         # Extract asset name from original URL before resolving
         # Format: https://github.com/owner/repo/releases/download/tag/asset-name
         if "/releases/download/" in source:
-            asset_name = source.split("/releases/download/")[1].split("/", 1)[-1]
-            # When a token is available (private repo), resolve via API to get the
-            # proper API asset endpoint - browser download URLs return 404 with token auth.
-            # Without a token (public repo), use the direct URL to avoid an API call.
-            if get_github_token():
-                logger.debug(f"Have GitHub token, resolving direct URL via API: {source}")
-                resolved_url = resolve_github_release_url(source)
-                if resolved_url:
-                    download_url = resolved_url
-                    logger.debug(f"Resolved to API URL: {download_url}")
-                else:
-                    logger.error(f"Failed to resolve GitHub release URL: {source}")
-                    return (None, False)
-            else:
-                logger.debug(f"Using direct GitHub download URL (no token): {source}")
-                download_url = source
-        else:
-            # Tag URL or other format - resolve via API
-            # Use GitHub API to resolve the URL (supports private repos with token from env)
-            resolved_url = resolve_github_release_url(source)
-            if resolved_url:
-                download_url = resolved_url
-                logger.debug(f"Resolved GitHub release URL to: {download_url}")
-            else:
-                logger.error(f"Failed to resolve GitHub release URL: {source}")
-                return (None, False)
+            # basename(): the URL segment after tag/ is meant to be a bare
+            # filename, but nothing stops it containing "/" or ".." - without
+            # this it could be used to escape artifacts_path below.
+            asset_name = os.path.basename(source.split("/releases/download/")[1].split("/", 1)[-1])
+
+        # Always resolve via the GitHub API, even without a token (when the
+        # direct browser_download_url would work fine on its own). This is
+        # deliberate, not just to get the right endpoint for private repos:
+        # it's the only way to get the asset's size/digest, which the cache
+        # check below uses to verify a cached or resumed file before reusing
+        # it without a fresh download. Skipping the API call whenever
+        # possible would mean that check silently never runs for the common
+        # "public repo, no GH_TOKEN" case - the one most deployments are in.
+        asset = resolve_github_release_asset(source)
+        if not asset:
+            logger.error(f"Failed to resolve GitHub release URL: {source}")
+            return (None, False)
+        download_url = asset["url"]
+        asset_size = asset.get("size")
+        asset_digest = asset.get("digest")
+        logger.debug(f"Resolved GitHub release URL to: {download_url} (size={asset_size}, digest={asset_digest})")
     
     # URL - check if already downloaded, otherwise download
     # Determine file name - prefer asset name from GitHub URL, then from download URL
@@ -274,7 +428,17 @@ def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Opt
             if not filename or filename == source:
                 # Fallback to generic name
                 filename = "downloaded-file"
-    
+
+    # However filename was derived above, reduce it to a bare basename before
+    # using it in a path join below - Path(...).name already strips directory
+    # components for a normal URL, but doesn't special-case ".."/"." as the
+    # final component, and asset_name (from parse_github_release_url's capture
+    # group) is now already basename()'d at its source, but this is the single
+    # choke point every branch above funnels through, so enforce it here too.
+    filename = os.path.basename(filename)
+    if filename in ("", ".", ".."):
+        filename = "downloaded-file"
+
     downloaded_path = artifacts_path / filename
     
     # Ensure artifacts directory exists
@@ -285,22 +449,38 @@ def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Opt
         logger.error(f"Could not create artifacts directory {artifacts_path}: {e}")
         return (None, False)
     
-    # Check if file already exists (preserve .tmp files for resumable downloads)
+    # Check if file already exists (preserve .tmp files for resumable downloads).
+    # /data is a world-writable filesystem, so this cache is not trustworthy on
+    # its own - a file could have been placed or altered by anything with
+    # local access. Only reuse it if it verifies against the asset metadata
+    # from the GitHub API; otherwise re-download rather than silently trusting
+    # whatever is already there.
     if downloaded_path.exists() and downloaded_path.is_file():
         file_size = downloaded_path.stat().st_size
         if file_size > 0:
-            logger.info(f"File already exists: {downloaded_path} ({file_size} bytes)")
-            logger.info("Skipping download, using existing file")
-            return (downloaded_path, False)
+            if asset_size is not None or asset_digest is not None:
+                ok, reason = _verify_file(downloaded_path, asset_size, asset_digest)
+                if ok:
+                    logger.info(f"File already exists and verified ({reason}): {downloaded_path}")
+                    logger.info("Skipping download, using existing file")
+                    return (downloaded_path, False)
+                logger.warning(f"Cached file failed verification ({reason}), re-downloading: {downloaded_path}")
+                downloaded_path.unlink()
+            else:
+                logger.warning(
+                    f"Cached file exists but no size/digest available to verify it against "
+                    f"({downloaded_path}); re-downloading rather than trusting it unverified"
+                )
+                downloaded_path.unlink()
         else:
             logger.warning(f"Existing file is empty, re-downloading")
             downloaded_path.unlink()
-    
+
     # Download file
     logger.info(f"Downloading file from URL: {download_url}")
-    if not download_file(download_url, downloaded_path):
+    if not download_file(download_url, downloaded_path, expected_size=asset_size, expected_digest=asset_digest):
         return (None, False)
-    
+
     return (downloaded_path, False)
 
 
