@@ -275,6 +275,13 @@ again. An update is tried at most **2 times** from the same running version; aft
 (with a warning in the log) until a newer release is available. The record is dropped once the running
 version changes. To retry manually, remove `/data/tsupdate-state.json`.
 
+### Cleanup After Updates
+
+The downloaded update stays in `/data/tsupdate/` until the update is confirmed: once the daemon starts on a
+version different from the one the update began at (and a tryboot configuration has been persisted), it removes
+the files in `/data/tsupdate/`. A failed boot therefore retries from the cached file instead of downloading it
+again, which matters on cellular connections.
+
 ### Update Application Workflow
 
 1. **Sync Root**: Execute `syncroot` to prepare inactive partition

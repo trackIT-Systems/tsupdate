@@ -117,3 +117,30 @@ class TestEnsureFileLocal:
 )
 def test_resolve_rsync_timeout(value, expected):
     assert resolve_rsync_timeout_seconds(value) == expected
+
+
+class TestPruneArtifacts:
+    def test_removes_files_and_leaves_directories(self, tmp_path):
+        (tmp_path / "update.tar").write_bytes(b"x")
+        (tmp_path / "update.tar.tmp").write_bytes(b"x")
+        (tmp_path / "image.img").write_bytes(b"x")
+        (tmp_path / "subdir").mkdir()
+        (tmp_path / "subdir" / "keep").write_bytes(b"x")
+        assert utils.prune_artifacts(tmp_path) == 3
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["subdir"]
+        assert (tmp_path / "subdir" / "keep").exists()
+
+    def test_symlinks_are_unlinked_not_followed(self, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "precious").write_bytes(b"x")
+        artifacts = tmp_path / "artifacts"
+        artifacts.mkdir()
+        (artifacts / "link-to-dir").symlink_to(outside, target_is_directory=True)
+        (artifacts / "link-to-file").symlink_to(outside / "precious")
+        assert utils.prune_artifacts(artifacts) == 2
+        assert list(artifacts.iterdir()) == []
+        assert (outside / "precious").exists()  # removing a link never removes what it points to
+
+    def test_missing_directory(self, tmp_path):
+        assert utils.prune_artifacts(tmp_path / "nope") == 0

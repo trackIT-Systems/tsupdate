@@ -28,7 +28,7 @@ from tsupdate.schedule import (
 from tsupdate.status import is_tryboot_active, read_booted_os_release
 from tsupdate.syncroot import execute_syncroot
 from tsupdate.tryboot import execute_tryboot, persist_boot_configuration
-from tsupdate.utils import ARTIFACTS_DIR, DEFAULT_RSYNC_TIMEOUT_SEC, ensure_file
+from tsupdate.utils import ARTIFACTS_DIR, DEFAULT_RSYNC_TIMEOUT_SEC, ensure_file, prune_artifacts
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +222,7 @@ def get_system_uptime() -> float:
         return 0.0
 
 
-def handle_tryboot_persist(timeout: int) -> None:
+def handle_tryboot_persist(timeout: int) -> bool:
     """
     Handle tryboot persistence on daemon startup.
     
@@ -231,10 +231,13 @@ def handle_tryboot_persist(timeout: int) -> None:
     
     Args:
         timeout: Seconds of system uptime to wait before persisting
+        
+    Returns:
+        True if the boot configuration is settled (regular boot, or persisted successfully)
     """
     if not is_tryboot_active():
         logger.info("System booted regularly (not via tryboot)")
-        return
+        return True
     
     # Get current system uptime
     uptime = get_system_uptime()
@@ -272,9 +275,26 @@ def handle_tryboot_persist(timeout: int) -> None:
     if persist_boot_configuration():
         final_uptime = get_system_uptime()
         logger.info(f"Boot configuration persisted successfully at uptime {final_uptime:.1f}s")
-    else:
-        logger.error("Failed to persist boot configuration")
-        logger.error("Manual intervention may be required")
+        return True
+    
+    logger.error("Failed to persist boot configuration")
+    logger.error("Manual intervention may be required")
+    return False
+
+
+def finalize_boot(persist_timeout: int) -> None:
+    """
+    Startup housekeeping after a (try)boot.
+
+    Persists a tryboot configuration once the new system has been up long enough. An update
+    that was attempted from an older version is history once the running version differs;
+    only then, with the new boot configuration settled, is its download no longer needed and
+    removed. Until then a failed boot would fall back and retry from the cached file instead
+    of downloading again.
+    """
+    settled = handle_tryboot_persist(persist_timeout)
+    if update_state.forget_if_version_changed(_running_version()) and settled:
+        prune_artifacts(ARTIFACTS_DIR)
 
 
 def notify_users(message: str) -> None:
@@ -846,14 +866,8 @@ def run_daemon(config_path: Path, schedule_path: Optional[Path] = None, verbose:
         else:
             logger.info("Schedule file not found or invalid - updates can be applied at any time")
     
-    # An update that was attempted from an older version is history once the version changed
-    running_version = _running_version()
-    if running_version:
-        update_state.forget_if_version_changed(running_version)
-    
     # Handle tryboot persistence on startup
-    persist_timeout = config.get("persist_timeout", 600)
-    handle_tryboot_persist(persist_timeout)
+    finalize_boot(config.get("persist_timeout", 600))
     
     # Enter main loop
     try:

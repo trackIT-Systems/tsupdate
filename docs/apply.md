@@ -103,6 +103,8 @@ sudo tsupdate apply /path/to/update.tar
 sudo tsupdate apply https://example.com/update.tar --keep-download
 ```
 
+A downloaded update is deleted from `/data/tsupdate/` after it was applied successfully, unless `--keep-download` is given. After a failure it is kept, so retrying does not download it again. A local file passed on the command line is never deleted.
+
 ## Complete Update Workflow
 
 ```bash

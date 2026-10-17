@@ -162,8 +162,9 @@ Downloads are cached in `/data/tsupdate/`:
 
 ### Cleanup Behavior
 
-- **Default**: Removes downloaded and extracted files after restore
-- **With `--keep-image`**: Preserves files in `/data/tsupdate/`
+- **Extracted image**: Always removed after the restore, successful or not (it is never reused, see above)
+- **Downloaded file**: Removed after a *successful* restore. After a failure it is kept, so retrying does not download it again
+- **With `--keep-image`**: The downloaded file is kept after a successful restore as well
 - **Local files**: Never deleted (source is kept)
 - **Temporary files**: Always cleaned up (even on errors)
 

@@ -17,7 +17,7 @@ from tsupdate.syncroot import (
     mount_context,
     ROOT_UP,
 )
-from tsupdate.utils import ARTIFACTS_DIR, ensure_file, resolve_rsync_timeout_seconds
+from tsupdate.utils import ARTIFACTS_DIR, ensure_file, resolve_rsync_timeout_seconds, safe_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -573,6 +573,12 @@ def execute_apply(
                 logger.debug(f"Removed temporary directory: {extracted_dir}")
             except OSError as e:
                 logger.warning(f"Could not remove temporary directory {extracted_dir}: {e}")
+    
+    # The update is applied: the download is no longer needed. It is kept after a failure, so a
+    # retry doesn't have to download it again. A file the user passed in is never deleted.
+    if not is_local_file and not keep_download:
+        logger.debug(f"Removing downloaded update {update_file_path}")
+        safe_cleanup(update_file_path)
     
     return 0
 

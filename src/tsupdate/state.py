@@ -90,11 +90,18 @@ def is_blocked(update_url: str, current_version: Optional[str]) -> bool:
     )
 
 
-def forget_if_version_changed(current_version: Optional[str]) -> None:
-    """Drop a stale record once the running version differs from the one the update started from."""
+def forget_if_version_changed(current_version: Optional[str]) -> bool:
+    """
+    Drop a stale record once the running version differs from the one the update started from.
+
+    Returns:
+        True if a record was dropped, i.e. a recorded update has now been installed
+    """
     if current_version is None:
-        return
+        return False
     data = _load()
     if data and data.get("from_version") != current_version:
         logger.info(f"Running version changed ({data.get('from_version')} -> {current_version}); clearing update state")
         discard_attempt()
+        return True
+    return False

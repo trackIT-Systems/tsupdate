@@ -300,6 +300,8 @@ def execute_restore(
     target_mounted = False
     is_local_file = False
     downloaded_path = None
+    extracted_path = None
+    success = False
     
     try:
         # Ensure file is available (download from URL if needed)
@@ -386,6 +388,7 @@ def execute_restore(
                     if sync_success:
                         logger.info("Sync completed successfully")
                     
+                    success = sync_success
                     return 0 if sync_success else 1
         except RuntimeError as e:
             logger.error(str(e))
@@ -395,4 +398,15 @@ def execute_restore(
         
         if loop_device:
             remove_loopback(loop_device)
+        
+        # The extracted image is never reused (see above), so it only takes up space.
+        if extracted_path is not None:
+            safe_cleanup(extracted_path)
+            safe_cleanup(extracted_path.with_suffix(extracted_path.suffix + ".tmp"))
+        
+        # Keep the download after a failure so a retry doesn't download it again; a file the
+        # user passed in is never deleted.
+        if success and downloaded_path is not None and not is_local_file and not keep_image:
+            logger.debug(f"Removing downloaded image {downloaded_path}")
+            safe_cleanup(downloaded_path)
 

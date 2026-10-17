@@ -96,4 +96,36 @@ class TestExtraction:
         env.ensure_result = (make_download(env), False)
         restore.execute_restore("https://x/tsOS-base.img.gz")
         assert env.ensure_calls == ["https://x/tsOS-base.img.gz"]
-        assert (env.artifacts / "tsOS-base.img.gz").exists()
+
+
+class TestCleanup:
+    def test_success_removes_download_and_extracted_image(self, env):
+        env.ensure_result = (make_download(env), False)
+        assert restore.execute_restore("https://x/tsOS-base.img.gz") == 0
+        assert list(env.artifacts.iterdir()) == []
+
+    def test_keep_image_keeps_the_download_but_not_the_extracted_image(self, env):
+        env.ensure_result = (make_download(env), False)
+        assert restore.execute_restore("https://x/tsOS-base.img.gz", keep_image=True) == 0
+        assert [p.name for p in env.artifacts.iterdir()] == ["tsOS-base.img.gz"]
+
+    def test_failed_sync_keeps_the_download_for_a_retry(self, env):
+        env.ensure_result = (make_download(env), False)
+        env.sync_ok = False
+        assert restore.execute_restore("https://x/tsOS-base.img.gz") == 1
+        assert [p.name for p in env.artifacts.iterdir()] == ["tsOS-base.img.gz"]
+
+    def test_local_file_is_never_deleted(self, env, tmp_path):
+        local = tmp_path / "mine.img.gz"
+        local.write_bytes(gzip.compress(IMG))
+        env.ensure_result = (local, True)
+        assert restore.execute_restore(str(local)) == 0
+        assert local.exists()
+        assert list(env.artifacts.iterdir()) == []  # but the extracted copy is still removed
+
+    def test_local_uncompressed_image_is_never_deleted(self, env, tmp_path):
+        local = tmp_path / "mine.img"
+        local.write_bytes(IMG)
+        env.ensure_result = (local, True)
+        assert restore.execute_restore(str(local)) == 0
+        assert local.read_bytes() == IMG

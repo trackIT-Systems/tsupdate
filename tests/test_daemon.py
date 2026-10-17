@@ -388,3 +388,38 @@ class TestCancellation:
         with patch.object(daemon, "execute_tryboot") as tb:
             assert not daemon.sync_and_apply_update(tmp_path / "u.tar", self.CFG, "https://u")
         tb.assert_not_called()
+
+
+class TestFinalizeBoot:
+    """The cached update is removed once the new version runs and its boot config is settled."""
+
+    @pytest.fixture
+    def artifacts(self, tmp_path, monkeypatch):
+        d = tmp_path / "artifacts"
+        d.mkdir()
+        (d / "update.tar").write_bytes(b"x")
+        monkeypatch.setattr(daemon, "ARTIFACTS_DIR", d)
+        monkeypatch.setattr(daemon, "handle_tryboot_persist", lambda timeout: True)
+        return d
+
+    def test_pruned_after_successful_update(self, artifacts):
+        update_state.record_attempt("https://u", "2025.12.2")  # started from an older version
+        daemon.finalize_boot(600)
+        assert list(artifacts.iterdir()) == []
+        assert update_state._load() == {}
+
+    def test_kept_when_boot_config_is_not_settled(self, artifacts, monkeypatch):
+        update_state.record_attempt("https://u", "2025.12.2")
+        monkeypatch.setattr(daemon, "handle_tryboot_persist", lambda timeout: False)
+        daemon.finalize_boot(600)
+        assert (artifacts / "update.tar").exists()
+
+    def test_kept_after_failed_boot_so_the_retry_needs_no_download(self, artifacts):
+        update_state.record_attempt("https://u", "2025.12.3")  # still running the version it started from
+        daemon.finalize_boot(600)
+        assert (artifacts / "update.tar").exists()
+        assert update_state.record_attempt("https://u", "2025.12.3") == 2
+
+    def test_kept_without_a_recorded_update(self, artifacts):
+        daemon.finalize_boot(600)
+        assert (artifacts / "update.tar").exists()

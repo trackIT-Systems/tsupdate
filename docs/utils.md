@@ -16,6 +16,8 @@ This module handles downloading files from URLs, caching them locally, and manag
 
 **`safe_cleanup(path)`**: Safely remove a file, ignoring errors (useful for cleanup operations).
 
+**`prune_artifacts(artifacts_path)`**: Remove all files from the artifacts directory (symlinks are unlinked, not followed; subdirectories are left alone). Used by the daemon once an update is confirmed. Returns the number of removed files.
+
 **`download_file(url, output_path)`**: Download file from URL with support for GitHub authentication.
 
 **`ensure_file(source, artifacts_path)`**: Ensure file is available locally, downloading if needed.
@@ -203,9 +205,10 @@ artifacts_path.mkdir(parents=True, exist_ok=True)
 
 When using `apply` or `restore` commands:
 
-- **Default**: Remove downloaded files after operation
-- **`--keep-download` / `--keep-image`**: Preserve files in artifacts directory
+- **Default**: Remove the downloaded file after a *successful* operation; it is kept after a failure so a retry needs no new download
+- **`--keep-download` / `--keep-image`**: Keep the downloaded file after success too
 - **Local files**: Never deleted (source file is unchanged)
+- **Daemon**: Passes the downloaded file as a local path, so it is kept until the new version is running and its boot configuration is persisted; then the whole artifacts directory is pruned
 
 ### Manual Cleanup
 

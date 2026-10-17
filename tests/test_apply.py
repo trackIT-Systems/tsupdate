@@ -203,3 +203,53 @@ class TestExecuteApply:
         monkeypatch.setattr(apply, "can_run_syncroot", lambda: False)
         assert apply.execute_apply(str(env["archive"])) == 1
         assert env["mounts"] == []
+
+
+class TestApplyCleanup:
+    """A downloaded update is deleted after a successful apply, but never a user-supplied file and
+    never after a failure (so a retry doesn't have to download it again)."""
+
+    @pytest.fixture
+    def downloaded(self, tmp_path, monkeypatch, booted_from):
+        from contextlib import contextmanager
+
+        booted_from(2)
+        monkeypatch.setattr(apply, "can_run_syncroot", lambda: True)
+        target = tmp_path / "root-up"
+        (target / "etc").mkdir(parents=True)
+        (target / "etc" / "os-release").write_text('PRETTY_NAME="tsOS base 2025.12.3"\n')
+
+        @contextmanager
+        def fake_mount(device, mount_point):
+            yield target
+
+        monkeypatch.setattr(apply, "mount_context", fake_mount)
+        archive = make_update_tar(tmp_path)
+        result = {"is_local": False}
+        monkeypatch.setattr(apply, "ensure_file", lambda source, artifacts: (archive, result["is_local"]))
+        return archive, result
+
+    def run(self, rc=0, **kw):
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess([], rc)):
+            return apply.execute_apply("https://github.com/trackIT-Systems/x/releases/download/v/u.tar", **kw)
+
+    def test_download_removed_after_success(self, downloaded):
+        archive, _ = downloaded
+        assert self.run() == 0
+        assert not archive.exists()
+
+    def test_keep_download(self, downloaded):
+        archive, _ = downloaded
+        assert self.run(keep_download=True) == 0
+        assert archive.exists()
+
+    def test_download_kept_after_failure(self, downloaded):
+        archive, _ = downloaded
+        assert self.run(rc=23) == 23
+        assert archive.exists()
+
+    def test_local_file_is_never_deleted(self, downloaded):
+        archive, result = downloaded
+        result["is_local"] = True
+        assert self.run() == 0
+        assert archive.exists()

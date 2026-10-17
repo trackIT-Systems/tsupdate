@@ -123,6 +123,34 @@ def safe_cleanup(path: Path) -> None:
         pass  # Ignore cleanup errors
 
 
+def prune_artifacts(artifacts_path: Optional[Path] = None) -> int:
+    """
+    Delete everything left in the artifacts directory (downloads, partial downloads,
+    extracted images) and return how many files were removed.
+
+    Only entries directly inside the directory are removed, symlinks are unlinked
+    rather than followed, and subdirectories are left alone.
+    """
+    if artifacts_path is None:
+        artifacts_path = ARTIFACTS_DIR
+    removed = 0
+    try:
+        entries = list(artifacts_path.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        if entry.is_dir() and not entry.is_symlink():
+            continue
+        try:
+            entry.unlink()
+            removed += 1
+        except OSError as e:
+            logger.warning(f"Could not remove {entry}: {e}")
+    if removed:
+        logger.info(f"Removed {removed} file(s) from {artifacts_path}")
+    return removed
+
+
 def _sha256_file(path: Path) -> str:
     """Compute the sha256 hex digest of a file, streaming it in chunks."""
     hasher = hashlib.sha256()
