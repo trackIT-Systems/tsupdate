@@ -259,6 +259,14 @@ When the daemon is about to reboot, it broadcasts a message via `wall` showing:
      - `apply`: Proceed with full workflow (ignore maintenance window)
 7. **If Not Found**: Log and return to step 1
 
+### Failed Updates
+
+Before rebooting into an update the daemon records the attempt in `/data/tsupdate-state.json`. If the new
+partition fails to boot, the Raspberry Pi falls back to the old one and the daemon finds the same update
+again. An update is tried at most **2 times** from the same running version; after that it is skipped
+(with a warning in the log) until a newer release is available. The record is dropped once the running
+version changes. To retry manually, remove `/data/tsupdate-state.json`.
+
 ### Update Application Workflow
 
 1. **Sync Root**: Execute `syncroot` to prepare inactive partition

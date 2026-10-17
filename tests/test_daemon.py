@@ -7,12 +7,20 @@ from unittest.mock import patch
 import pytest
 
 from tsupdate import daemon
+from tsupdate import state as update_state
 
 
 @pytest.fixture(autouse=True)
 def reset_daemon_flags(monkeypatch):
     monkeypatch.setattr(daemon, "_cancel_update", False)
     monkeypatch.setattr(daemon, "_shutdown_requested", False)
+
+
+@pytest.fixture(autouse=True)
+def isolated_update_state(monkeypatch, tmp_path):
+    """Never touch /data, and pin the running version the daemon sees."""
+    monkeypatch.setattr(update_state, "STATE_FILE", tmp_path / "state" / "tsupdate-state.json")
+    monkeypatch.setattr(daemon, "_running_version", lambda: "2025.12.3")
 
 
 @pytest.fixture
@@ -295,3 +303,55 @@ class TestNextCheckDelay:
     @pytest.mark.parametrize("until", [None, -5, 0])
     def test_unknown_or_past_start_uses_interval(self, monkeypatch, until):
         assert self.delay(monkeypatch, until) == 3600
+
+
+class TestFailedUpdateDoesNotLoop:
+    """A new partition that fails to boot makes the Pi fall back to the old one, which then finds the
+    same update again. That must not repeat forever."""
+
+    CFG = {"check_interval": 60, "do": "apply", "update_countdown": 0, "rsync_timeout": 1}
+
+    @pytest.fixture
+    def reboots(self, monkeypatch, tmp_path, no_wall):
+        reboots = []
+        monkeypatch.setattr(daemon, "check_for_updates", lambda c: "https://u")
+        monkeypatch.setattr(daemon, "download_update", lambda u, c: tmp_path / "u.tar")
+        monkeypatch.setattr(daemon, "execute_syncroot", lambda **kw: 0)
+        monkeypatch.setattr(daemon, "execute_apply", lambda *a, **kw: 0)
+        monkeypatch.setattr(daemon, "countdown_with_cancel", lambda s: True)
+        monkeypatch.setattr(daemon, "execute_tryboot", lambda **kw: reboots.append(1) or 0)
+        return reboots
+
+    def boot_daemon(self, monkeypatch):
+        """One daemon lifetime: runs until it reboots (SystemExit) or reaches its first sleep."""
+        monkeypatch.setattr(daemon, "_shutdown_requested", False)
+        monkeypatch.setattr(daemon.time, "sleep", lambda s: setattr(daemon, "_shutdown_requested", True))
+        try:
+            daemon.main_loop(self.CFG)
+        except SystemExit:
+            pass
+
+    def test_gives_up_after_max_attempts(self, monkeypatch, reboots):
+        for _ in range(6):  # six boots, each of which falls back to the old partition
+            self.boot_daemon(monkeypatch)
+        assert len(reboots) == update_state.MAX_UPDATE_ATTEMPTS
+
+    def test_new_update_is_still_applied(self, monkeypatch, reboots):
+        for _ in range(4):
+            self.boot_daemon(monkeypatch)
+        monkeypatch.setattr(daemon, "check_for_updates", lambda c: "https://newer")
+        self.boot_daemon(monkeypatch)
+        assert len(reboots) == update_state.MAX_UPDATE_ATTEMPTS + 1
+
+    def test_attempt_is_recorded_before_the_reboot(self, monkeypatch, reboots, tmp_path):
+        seen = []
+        monkeypatch.setattr(
+            daemon, "execute_tryboot", lambda **kw: seen.append(update_state._load().get("attempts")) or 0
+        )
+        daemon.sync_and_apply_update(tmp_path / "u.tar", self.CFG, "https://u")
+        assert seen == [1]
+
+    def test_attempt_discarded_when_tryboot_could_not_be_configured(self, monkeypatch, reboots, tmp_path):
+        monkeypatch.setattr(daemon, "execute_tryboot", lambda **kw: 1)
+        assert not daemon.sync_and_apply_update(tmp_path / "u.tar", self.CFG, "https://u")
+        assert update_state._load() == {}

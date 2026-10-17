@@ -11,7 +11,7 @@ from typing import Optional, Tuple
 
 import yaml
 
-from tsupdate import configure_logging, is_root
+from tsupdate import configure_logging, is_root, state as update_state
 from tsupdate.apply import execute_apply
 from tsupdate.github import (
     fetch_releases,
@@ -391,6 +391,11 @@ def next_check_delay(
     return check_interval
 
 
+def _running_version() -> Optional[str]:
+    os_release = read_booted_os_release()
+    return os_release.version_id if os_release else None
+
+
 def download_update(update_url: str, config: dict) -> Optional[Path]:
     """
     Download update file.
@@ -536,7 +541,7 @@ def check_for_updates(config: dict) -> Optional[str]:
         return None
 
 
-def sync_and_apply_update(update_file_path: Path, config: dict) -> bool:
+def sync_and_apply_update(update_file_path: Path, config: dict, update_url: Optional[str] = None) -> bool:
     """
     Sync root partition and apply update from file.
     
@@ -546,6 +551,8 @@ def sync_and_apply_update(update_file_path: Path, config: dict) -> bool:
     Args:
         update_file_path: Path to downloaded update file
         config: Configuration dictionary
+        update_url: URL the update came from; used to remember attempts and
+            cancellations so the same update is not retried endlessly
         
     Returns:
         True if update applied and reboot initiated, False on error or cancellation
@@ -599,8 +606,15 @@ def sync_and_apply_update(update_file_path: Path, config: dict) -> bool:
         logger.info("Initiating tryboot reboot...")
         notify_users("Rebooting to activate update (via tryboot)...")
         
+        # Record the attempt *before* rebooting: if the new partition fails to boot, the
+        # firmware falls back to this one and the daemon would find the same update again.
+        if update_url:
+            attempts = update_state.record_attempt(update_url, _running_version())
+            logger.info(f"Update attempt {attempts} of {update_state.MAX_UPDATE_ATTEMPTS}")
+        
         tryboot_result = execute_tryboot(reboot=True)
         if tryboot_result != 0:
+            update_state.discard_attempt()
             logger.error("Failed to configure tryboot")
             notify_users("Failed to configure tryboot - manual intervention required")
             return False
@@ -642,7 +656,7 @@ def apply_update_workflow(update_url: str, config: dict, update_file_path: Optio
             logger.info(f"Using already downloaded update file: {update_file_path}")
         
         # Sync and apply the update
-        return sync_and_apply_update(update_file_path, config)
+        return sync_and_apply_update(update_file_path, config, update_url)
         
     except Exception as e:
         logger.error(f"Error during update workflow: {e}", exc_info=True)
@@ -745,12 +759,21 @@ def main_loop(config: dict, maintenance_entry: Optional[dict] = None) -> None:
                     else:
                         logger.info("Update found (mode: apply) - proceeding with full update workflow")
                     
-                    success = apply_update_workflow(update_url, config)
+                    if update_state.is_blocked(update_url, _running_version()):
+                        logger.warning(
+                            f"Not applying {update_url}: it was already attempted "
+                            f"{update_state.MAX_UPDATE_ATTEMPTS} times from this version without success "
+                            f"(failed to boot, or cancelled). Waiting for a newer update; "
+                            f"remove {update_state.STATE_FILE} to retry."
+                        )
+                        success = False
+                    else:
+                        success = apply_update_workflow(update_url, config)
                     if success:
                         logger.info("Tryboot reboot initiated - daemon exiting")
                         sys.exit(0)
                     else:
-                        logger.info("Update workflow did not complete - continuing normal operation")
+                        logger.info("Update not applied - continuing normal operation")
                 # else: nothing mode already handled above
             else:
                 logger.info("No updates available")
@@ -812,6 +835,11 @@ def run_daemon(config_path: Path, schedule_path: Optional[Path] = None, verbose:
                 logger.info("No maintenance entry found in schedule - updates can be applied at any time")
         else:
             logger.info("Schedule file not found or invalid - updates can be applied at any time")
+    
+    # An update that was attempted from an older version is history once the version changed
+    running_version = _running_version()
+    if running_version:
+        update_state.forget_if_version_changed(running_version)
     
     # Handle tryboot persistence on startup
     persist_timeout = config.get("persist_timeout", 600)
