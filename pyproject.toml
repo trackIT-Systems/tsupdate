@@ -27,7 +27,7 @@ dependencies = [
     "PyGithub>=2.6.1",
     "PyYAML>=6.0.2",
     "requests>=2.32.3",
-    "scheduleparse @ git+https://github.com/trackIT-Systems/scheduleparse.git@2025.10.1",
+    "scheduleparse @ git+https://github.com/trackIT-Systems/scheduleparse.git@2026.10.3",
 ]
 
 [project.optional-dependencies]

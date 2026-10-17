@@ -40,18 +40,24 @@ class TestSchedule:
         )
         assert schedule.get_next_maintenance_window_start({"start": "00:00", "stop": "01:00"}) is not None
 
-    @pytest.mark.parametrize("entry", [{"start": "02:00"}, {"stop": "02:00"}, "nope"])
-    def test_bad_entries_are_not_active(self, entry):
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            {"start": "02:00"},
+            {"stop": "02:00"},
+            "nope",
+            {"start": "bogus", "stop": "03:00"},
+            {"start": "02:00", "stop": "3:OO"},
+            {"start": "02:00", "stop": "sunrise+bogus"},
+        ],
+    )
+    def test_bad_entries_are_rejected(self, entry):
+        """An unparseable start/stop (a typo) must not silently become midnight, i.e. a ~22h window."""
         assert schedule.is_in_maintenance_window(entry) is False
         assert schedule.get_next_maintenance_window_start(entry) is None
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG: scheduleparse parses unknown time strings as midnight, so a typo like stop: '3:OO' "
-        "silently turns into a ~22h maintenance window instead of being rejected",
-    )
-    def test_unparseable_times_are_rejected(self):
-        assert schedule.get_next_maintenance_window_start({"start": "02:00", "stop": "bogus"}) is None
+    def test_valid_entry_has_next_start(self):
+        assert schedule.get_next_maintenance_window_start({"start": "02:00", "stop": "02:30"}) is not None
 
 
 def run_cli(monkeypatch, *argv):

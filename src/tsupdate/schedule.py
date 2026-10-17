@@ -173,6 +173,11 @@ def get_next_maintenance_window_start(maintenance_entry: dict) -> Optional[datet
         # Get next start time
         next_start = schedule_entry.next_start()
         
+        # next_start() only evaluates `start`. Evaluate `stop` too, so that a typo in it
+        # (scheduleparse raises ValueError) rejects the whole window up front instead of
+        # being noticed only once the window should have opened.
+        schedule_entry.next_stop()
+        
         if next_start:
             logger.debug(f"Next maintenance window starts at: {next_start}")
             return next_start
