@@ -141,18 +141,66 @@ class TestRollback:
         assert tryboot.rollback_tryboot(reboot=False) == 1
 
 
-class TestOpenPreserveTimes:
-    def test_only_mtime_preserved(self, tmp_path):
+class TestWriteFileAtomic:
+    def test_replaces_content(self, tmp_path):
+        p = tmp_path / "cmdline.txt"
+        p.write_text("old")
+        tryboot.write_file_atomic(p, "new\n")
+        assert p.read_text() == "new\n"
+        assert list(tmp_path.iterdir()) == [p]  # no temp file left behind
+
+    def test_creates_missing_file(self, tmp_path):
+        p = tmp_path / "new"
+        tryboot.write_file_atomic(p, "z", preserve_times=True)
+        assert p.read_text() == "z"
+
+    def test_preserves_times_only_when_asked(self, tmp_path):
         p = tmp_path / "f"
         p.write_text("x")
         os.utime(p, (1_000_000_000, 1_000_000_000))
-        with tryboot.open_preserve_times(p, "w", preserve_atime=False, preserve_mtime=True) as f:
-            f.write("y")
-        assert p.stat().st_mtime == 1_000_000_000
-        assert p.read_text() == "y"
+        tryboot.write_file_atomic(p, "y", preserve_times=True)
+        assert (p.stat().st_atime, p.stat().st_mtime) == (1_000_000_000, 1_000_000_000)
+        tryboot.write_file_atomic(p, "z")
+        assert p.stat().st_mtime > 1_000_000_000
 
-    def test_new_file_is_created(self, tmp_path):
-        p = tmp_path / "new"
-        with tryboot.open_preserve_times(p, "w") as f:
-            f.write("z")
-        assert p.read_text() == "z"
+    def test_failure_before_rename_leaves_original_intact(self, tmp_path):
+        """A crash while writing must not truncate the file: that is what would leave the Pi unbootable."""
+        p = tmp_path / "cmdline.txt"
+        p.write_text("root=/dev/mmcblk0p2\n")
+        with patch("os.replace", side_effect=OSError("power cut")), pytest.raises(OSError):
+            tryboot.write_file_atomic(p, "root=/dev/mmcblk0p3\n")
+        assert p.read_text() == "root=/dev/mmcblk0p2\n"
+        assert list(tmp_path.iterdir()) == [p]
+
+    def test_failure_while_writing_leaves_original_intact(self, tmp_path):
+        p = tmp_path / "cmdline.txt"
+        p.write_text("root=/dev/mmcblk0p2\n")
+        with patch("os.fsync", side_effect=OSError("disk full")), pytest.raises(OSError):
+            tryboot.write_file_atomic(p, "root=/dev/mmcblk0p3\n")
+        assert p.read_text() == "root=/dev/mmcblk0p2\n"
+        assert list(tmp_path.iterdir()) == [p]
+
+    def test_data_is_synced_before_rename(self, tmp_path):
+        order = []
+        real_replace = os.replace
+        with patch("os.fsync", side_effect=lambda fd: order.append("fsync")), patch(
+            "os.replace", side_effect=lambda a, b: (order.append("replace"), real_replace(a, b))
+        ):
+            tryboot.write_file_atomic(tmp_path / "f", "x")
+        assert order[:2] == ["fsync", "replace"]
+
+
+class TestBootFileWritesAreAtomic:
+    def test_persist_failure_keeps_cmdline(self, boot_dir):
+        before = (boot_dir / "cmdline.txt").read_text()
+        (boot_dir / "tryline.txt").write_text("root=/dev/mmcblk0p3\n")
+        with patch("os.replace", side_effect=OSError("power cut")):
+            assert not tryboot.persist_boot_configuration()
+        assert (boot_dir / "cmdline.txt").read_text() == before
+
+    def test_rollback_failure_keeps_cmdline(self, boot_dir, booted_from):
+        booted_from(3, tryboot_active=True)
+        (boot_dir / "cmdline.txt").write_text("root=/dev/mmcblk0p3\n")
+        with patch("os.replace", side_effect=OSError("power cut")):
+            assert tryboot.rollback_tryboot(reboot=False) == 1
+        assert (boot_dir / "cmdline.txt").read_text() == "root=/dev/mmcblk0p3\n"

@@ -1,11 +1,11 @@
 """Tryboot tool for switching boot partitions."""
 
-from contextlib import contextmanager
 import logging
 import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -22,49 +22,51 @@ CONFIG_FILE = BOOT_DIR / "config.txt"
 TRYBOOT_CONFIG_FILE = BOOT_DIR / "tryboot.txt"
 
 
-@contextmanager
-def open_preserve_times(
-    path: Path,
-    mode: str = "r",
-    encoding: Optional[str] = None,
-    preserve_atime: bool = True,
-    preserve_mtime: bool = True,
-):
+def write_file_atomic(path: Path, content: str, preserve_times: bool = False) -> None:
     """
-    Context manager that wraps open() and optionally preserves the file's atime and/or mtime.
-    
-    If preserve_atime or preserve_mtime is True and the file exists, the original
-    timestamps are recorded and restored after the file is closed.
+    Replace the contents of a file atomically.
+
+    The new content is written to a temporary file in the same directory,
+    flushed to disk and then renamed over the target, so a power cut leaves
+    either the complete old or the complete new file - never a truncated one.
+    This matters for cmdline.txt: a truncated file leaves the device unbootable.
+
+    Args:
+        path: File to write
+        content: New file content
+        preserve_times: Keep the atime/mtime of the existing file (if there is one)
+
+    Raises:
+        OSError: If the file could not be written (the original is left untouched)
     """
-    old_atime = None
-    old_mtime = None
-    
-    if (preserve_atime or preserve_mtime) and path.exists():
+    old_times = None
+    if preserve_times:
         try:
-            stat = path.stat()
-            old_atime = stat.st_atime
-            old_mtime = stat.st_mtime
-        except OSError as e:
-            logger.warning(f"Could not read times for {path}: {e}")
-            
+            st = path.stat()
+            old_times = (st.st_atime, st.st_mtime)
+        except FileNotFoundError:
+            pass
+
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
     try:
-        with open(path, mode, encoding=encoding) as f:
-            yield f
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        if old_times is not None:
+            os.utime(tmp_path, old_times)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    # Persist the rename itself
+    dir_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
     finally:
-        if (old_atime is not None or old_mtime is not None) and path.exists():
-            try:
-                if not preserve_atime or not preserve_mtime:
-                    current_stat = path.stat()
-                    target_atime = old_atime if preserve_atime else current_stat.st_atime
-                    target_mtime = old_mtime if preserve_mtime else current_stat.st_mtime
-                else:
-                    target_atime = old_atime
-                    target_mtime = old_mtime
-                
-                os.utime(path, (target_atime, target_mtime))
-                logger.debug(f"Restored times for {path}: atime={target_atime}, mtime={target_mtime}")
-            except OSError as e:
-                logger.warning(f"Could not restore times for {path}: {e}")
+        os.close(dir_fd)
 
 
 def is_regular_boot() -> bool:
@@ -175,9 +177,7 @@ def copy_and_modify_cmdline(target_partition: int, target_label: str) -> bool:
     
     # Write to tryline.txt
     try:
-        with open(TRYLINE_FILE, "w", encoding="utf-8") as f:
-            f.write(modified_cmdline)
-            f.write("\n")
+        write_file_atomic(TRYLINE_FILE, modified_cmdline + "\n")
         logger.info(f"Writing tryline.txt to boot partition {target_label} (p{target_partition})")
         return True
     except (OSError, IOError) as e:
@@ -200,8 +200,7 @@ def copy_config_to_tryboot() -> bool:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             config_content = f.read()
         
-        with open(TRYBOOT_CONFIG_FILE, "w", encoding="utf-8") as f:
-            f.write(config_content)
+        write_file_atomic(TRYBOOT_CONFIG_FILE, config_content)
         logger.debug(f"Copied {CONFIG_FILE} to {TRYBOOT_CONFIG_FILE}")
         return True
     except (OSError, IOError) as e:
@@ -233,9 +232,7 @@ def add_cmdline_entry() -> bool:
                 content += "\n"
             content += entry + "\n"
             
-            # Write back
-            with open(TRYBOOT_CONFIG_FILE, "w", encoding="utf-8") as f:
-                f.write(content)
+            write_file_atomic(TRYBOOT_CONFIG_FILE, content)
             logger.debug(f"Added cmdline entry to {TRYBOOT_CONFIG_FILE}")
         else:
             logger.debug(f"Cmdline entry already present in {TRYBOOT_CONFIG_FILE}")
@@ -298,9 +295,7 @@ def persist_boot_configuration() -> bool:
         return False
     
     try:
-        with open_preserve_times(CMDLINE_FILE, "w", encoding="utf-8", preserve_atime=True, preserve_mtime=True) as f:
-            f.write(tryline_content)
-            f.write("\n")
+        write_file_atomic(CMDLINE_FILE, tryline_content + "\n", preserve_times=True)
         logger.debug(f"Copied {TRYLINE_FILE} to {CMDLINE_FILE}")
         return True
     except (OSError, IOError) as e:
@@ -405,9 +400,7 @@ def rollback_tryboot(reboot: bool = True) -> int:
     
     # Write restored cmdline.txt
     try:
-        with open_preserve_times(CMDLINE_FILE, "w", encoding="utf-8", preserve_atime=True, preserve_mtime=True) as f:
-            f.write(modified_cmdline)
-            f.write("\n")
+        write_file_atomic(CMDLINE_FILE, modified_cmdline + "\n", preserve_times=True)
         logger.info(f"Restored {CMDLINE_FILE} to point to {previous_label} (p{previous_partition_num})")
     except (OSError, IOError) as e:
         logger.error(f"Could not write {CMDLINE_FILE}: {e}")

@@ -42,6 +42,8 @@ Located in `/boot/firmware/`:
 
 **`persist_boot_configuration()`**: Copy `tryline.txt` to `cmdline.txt` to make tryboot permanent.
 
+**`write_file_atomic(path, content, preserve_times=False)`**: All boot files are written to a temporary file, synced to disk and renamed over the original. A power cut can therefore never leave a truncated `cmdline.txt` (which would make the device unbootable). `cmdline.txt` additionally keeps its original atime/mtime.
+
 **`execute_persist(reboot)`**: Execute persistence process with validation and optional reboot.
 
 ### Rollback
