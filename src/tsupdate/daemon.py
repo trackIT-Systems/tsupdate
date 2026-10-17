@@ -569,13 +569,13 @@ def check_for_updates(config: dict) -> Optional[str]:
         
         # Fetch releases
         include_prereleases = config.get("include_prereleases", False)
-        releases = fetch_releases(owner, repo, include_prereleases=include_prereleases)
+        max_releases = config.get("max_releases", 5)
+        releases = fetch_releases(owner, repo, include_prereleases=include_prereleases, limit=max_releases)
         if not releases:
             logger.debug("Could not fetch releases from GitHub")
             return None
         
         # Find applicable batch update
-        max_releases = config.get("max_releases", 5)
         batch_url = find_applicable_batch_update(releases, version_id, max_releases=max_releases)
         
         if batch_url:

@@ -82,13 +82,49 @@ class TestGetAssets:
 
 
 class TestFetchReleases:
-    def test_filters_prereleases(self):
-        rels = [release("b", prerelease=True), release("a")]
+    @staticmethod
+    def client_with(releases):
+        """A client whose get_releases() is lazy like PyGithub's PaginatedList; counts what is read."""
+        read = []
+
+        def paginated():
+            for r in releases:
+                read.append(r.tag_name)
+                yield r
+
         client = MagicMock()
-        client.get_repo.return_value.get_releases.return_value = rels
+        client.get_repo.return_value.get_releases.side_effect = paginated
+        return client, read
+
+    def test_filters_prereleases(self):
+        client, _ = self.client_with([release("b", prerelease=True), release("a")])
         with patch.object(github, "_create_github_client", return_value=client):
             assert [r.tag_name for r in github.fetch_releases("trackIT-Systems", "x")] == ["a"]
             assert len(github.fetch_releases("trackIT-Systems", "x", include_prereleases=True)) == 2
+
+    def test_limit_applies_after_the_prerelease_filter(self):
+        rels = [release("pre1", prerelease=True), release("a"), release("pre2", prerelease=True), release("b"), release("c")]
+        client, _ = self.client_with(rels)
+        with patch.object(github, "_create_github_client", return_value=client):
+            assert [r.tag_name for r in github.fetch_releases("o", "x", limit=2)] == ["a", "b"]
+            assert [r.tag_name for r in github.fetch_releases("o", "x", include_prereleases=True, limit=2)] == ["pre1", "a"]
+
+    def test_stops_reading_once_the_limit_is_reached(self):
+        """Not every release of the repository is paged through just to use the first few."""
+        client, read = self.client_with([release(f"r{i}") for i in range(500)])
+        with patch.object(github, "_create_github_client", return_value=client):
+            assert len(github.fetch_releases("o", "x", limit=5)) == 5
+        assert read == ["r0", "r1", "r2", "r3", "r4"]
+
+    def test_no_limit_returns_everything(self):
+        client, _ = self.client_with([release(f"r{i}") for i in range(30)])
+        with patch.object(github, "_create_github_client", return_value=client):
+            assert len(github.fetch_releases("o", "x")) == 30
+
+    def test_fewer_releases_than_the_limit(self):
+        client, _ = self.client_with([release("only")])
+        with patch.object(github, "_create_github_client", return_value=client):
+            assert len(github.fetch_releases("o", "x", limit=5)) == 1
 
 
 class TestResolveReleaseAsset:

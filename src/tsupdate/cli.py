@@ -97,8 +97,8 @@ def execute_check(include_prereleases: bool = False, max_releases: int = 5, gith
     owner, repo = repo_info
     logger.debug(f"GitHub repository: {owner}/{repo}")
     
-    # Fetch releases
-    releases = fetch_releases(owner, repo, include_prereleases=include_prereleases)
+    # Fetch releases (only as many as are searched for a batch update)
+    releases = fetch_releases(owner, repo, include_prereleases=include_prereleases, limit=max_releases)
     if not releases:
         logger.error("Could not fetch releases from GitHub")
         return 1
@@ -126,6 +126,14 @@ def execute_check(include_prereleases: bool = False, max_releases: int = 5, gith
         print(f"  (current version: {version_id})")
     
     return 0
+
+
+def positive_int(value: str) -> int:
+    """argparse type for an integer >= 1."""
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1 (got {number})")
+    return number
 
 
 def main():
@@ -400,7 +408,7 @@ def main():
     )
     parser_check.add_argument(
         "--max-releases",
-        type=int,
+        type=positive_int,
         default=5,
         metavar="N",
         help="Maximum number of recent releases to check for batch updates (default: 5)",

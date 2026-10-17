@@ -33,7 +33,7 @@ For private repositories, the token must have `repo` scope permissions.
 
 ### Release Fetching
 
-**`fetch_releases(owner, repo, include_prereleases)`**: Get list of releases from repository.
+**`fetch_releases(owner, repo, include_prereleases, limit)`**: Get list of releases from repository. With `limit` only that many (the newest, after filtering pre-releases) are fetched; the API is read page by page, so a small limit does not load the repository's whole release history. The daemon and `tsupdate check` pass `max_releases` as the limit.
 
 **`find_latest_image(releases)`**: Find latest OS image in releases.
 
@@ -76,7 +76,7 @@ support_url = os_release.get("SUPPORT_URL")
 owner, repo = parse_github_repo_url(support_url)
 
 # Fetch releases
-releases = fetch_releases(owner, repo, include_prereleases=False)
+releases = fetch_releases(owner, repo, include_prereleases=False, limit=5)
 
 # Find latest image
 image_url = find_latest_image(releases)

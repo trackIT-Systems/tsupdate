@@ -2,6 +2,7 @@
 
 import logging
 import os
+import itertools
 import re
 import subprocess
 from typing import List, Optional, Tuple
@@ -382,7 +383,12 @@ def resolve_github_release_asset(url: str) -> Optional[dict]:
     return None
 
 
-def fetch_releases(owner: str, repo: str, include_prereleases: bool = False) -> Optional[List]:
+def fetch_releases(
+    owner: str,
+    repo: str,
+    include_prereleases: bool = False,
+    limit: Optional[int] = None,
+) -> Optional[List]:
     """
     Fetch GitHub releases using PyGithub.
     
@@ -392,6 +398,9 @@ def fetch_releases(owner: str, repo: str, include_prereleases: bool = False) -> 
         owner: GitHub repository owner
         repo: GitHub repository name
         include_prereleases: If True, include pre-releases. If False, filter them out.
+        limit: Return at most this many releases (the newest, after filtering). The API is
+            paginated and read lazily, so a small limit fetches only the first page or two
+            instead of every release the repository ever had. None returns all releases.
         
     Returns:
         List of Release objects from PyGithub, or None on error
@@ -402,17 +411,15 @@ def fetch_releases(owner: str, repo: str, include_prereleases: bool = False) -> 
         logger.debug(f"Fetching releases from: {owner}/{repo}")
         repository = g.get_repo(f"{owner}/{repo}")
         
-        # Get all releases (sorted by date, latest first)
-        all_releases = list(repository.get_releases())
+        # Releases are sorted by date, latest first. get_releases() pages lazily, so stop
+        # reading as soon as `limit` matching releases were found.
+        candidates = repository.get_releases()
+        if not include_prereleases:
+            candidates = (r for r in candidates if not r.prerelease)
+        releases = list(itertools.islice(candidates, limit))
         
-        if include_prereleases:
-            releases = all_releases
-            logger.debug(f"Fetched {len(releases)} releases (including pre-releases)")
-        else:
-            # Filter out pre-releases
-            releases = [r for r in all_releases if not r.prerelease]
-            logger.debug(f"Fetched {len(all_releases)} total releases, {len(releases)} regular releases (excluding pre-releases)")
-        
+        kind = "releases" if include_prereleases else "regular releases (excluding pre-releases)"
+        logger.debug(f"Fetched {len(releases)} {kind}" + (f" (limit {limit})" if limit is not None else ""))
         return releases
                 
     except GithubException as e:

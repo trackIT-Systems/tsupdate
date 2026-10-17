@@ -208,7 +208,7 @@ class TestCheckForUpdates:
             daemon, "find_applicable_batch_update", return_value="https://url"
         ) as find:
             assert daemon.check_for_updates({"include_prereleases": True, "max_releases": 3}) == "https://url"
-        fetch.assert_called_once_with("trackIT-Systems", "tsOS-base", include_prereleases=True)
+        fetch.assert_called_once_with("trackIT-Systems", "tsOS-base", include_prereleases=True, limit=3)
         find.assert_called_once_with(["r"], "2025.12.3", max_releases=3)
 
     def test_disallowed_owner_in_config_is_rejected(self, tmp_path, monkeypatch):

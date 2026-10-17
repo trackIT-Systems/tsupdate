@@ -100,3 +100,18 @@ class TestCli:
     def test_no_command_prints_help(self, monkeypatch, capsys):
         assert run_cli(monkeypatch) == 0
         assert "usage" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("value", ["0", "-3", "many"])
+    def test_max_releases_must_be_a_positive_integer(self, monkeypatch, value):
+        with patch.object(cli, "execute_check") as check:
+            assert run_cli(monkeypatch, "check", "--max-releases", value) == 2  # argparse usage error
+        check.assert_not_called()
+
+    def test_check_passes_max_releases_as_fetch_limit(self, monkeypatch):
+        from tsupdate.status import OSRelease
+
+        monkeypatch.setattr(cli, "read_booted_os_release", lambda: OSRelease(
+            {"VERSION_ID": "2025.12.3", "SUPPORT_URL": "https://github.com/trackIT-Systems/tsOS-base"}))
+        with patch.object(cli, "fetch_releases", return_value=[]) as fetch:
+            assert cli.execute_check(max_releases=7) == 1
+        fetch.assert_called_once_with("trackIT-Systems", "tsOS-base", include_prereleases=False, limit=7)
