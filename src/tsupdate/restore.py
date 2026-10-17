@@ -336,31 +336,16 @@ def execute_restore(
             
             extracted_path = artifacts_path / extracted_filename
             
-            # Clean up any leftover temporary files from interrupted extractions
-            temp_extracted_path = extracted_path.with_suffix(extracted_path.suffix + ".tmp")
-            safe_cleanup(temp_extracted_path)
-            
-            # Check if extracted .img file already exists
-            if extracted_path.exists() and extracted_path.is_file():
-                file_size = extracted_path.stat().st_size
-                if file_size > 0:
-                    logger.info(f"Extracted image file already exists: {extracted_path} ({file_size} bytes)")
-                    logger.info("Skipping extraction, using existing file")
-                    image_path = extracted_path
-                    logger.debug(f"Using existing extracted image: {image_path}")
-                else:
-                    logger.warning(f"Existing extracted file is empty, re-extracting")
-                    extracted_path.unlink()
-                    if not extract_image(downloaded_path, extracted_path):
-                        return 1
-                    image_path = extracted_path
-                    logger.debug(f"Using extracted image: {image_path}")
-            else:
-                # Extract image
-                if not extract_image(downloaded_path, extracted_path):
-                    return 1
-                image_path = extracted_path
-                logger.debug(f"Using extracted image: {image_path}")
+            # Always extract afresh and never reuse an earlier .img: /data is world-writable, so
+            # an existing file there can't be trusted (the compressed download, in contrast, was
+            # verified against the GitHub asset digest by ensure_file()). Re-extracting is cheap,
+            # re-downloading is not, so only the former is repeated.
+            safe_cleanup(extracted_path)
+            safe_cleanup(extracted_path.with_suffix(extracted_path.suffix + ".tmp"))
+            if not extract_image(downloaded_path, extracted_path):
+                return 1
+            image_path = extracted_path
+            logger.debug(f"Using extracted image: {image_path}")
         
         # Setup loopback device
         loop_device = setup_loopback(image_path)

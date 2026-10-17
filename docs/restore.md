@@ -156,10 +156,9 @@ The `--partition` flag selects which partition from the image to restore to the 
 
 ### Download Caching
 
-Downloaded and extracted images are cached in `/data/tsupdate/`:
-- Reuses existing downloads if file already exists
-- Skips re-extraction if .img already exists
-- Saves bandwidth and time for repeated operations
+Downloads are cached in `/data/tsupdate/`:
+- An existing download is reused only if it matches the size/digest GitHub reports for the asset, so a repeated restore does not download the image again (important on cellular connections)
+- The compressed image is **always extracted again**. `/data` is world-writable, so an `.img` found there is never trusted; a stale or pre-placed one is deleted first
 
 ### Cleanup Behavior
 
