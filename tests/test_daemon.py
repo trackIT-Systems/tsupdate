@@ -168,6 +168,26 @@ class TestTrybootPersist:
         assert sum(sleeps) == pytest.approx(25.0)
         persist.assert_called_once()
 
+    def test_logs_progress_about_once_a_minute(self, booted_from, monkeypatch, caplog):
+        booted_from(3, tryboot_active=True)
+        # a fractional uptime, as read from /proc/uptime: never an exact multiple of anything
+        monkeypatch.setattr(daemon, "get_system_uptime", lambda: 12.34)
+        monkeypatch.setattr(daemon.time, "sleep", lambda s: None)
+        with patch.object(daemon, "persist_boot_configuration", return_value=True), caplog.at_level("INFO"):
+            daemon.handle_tryboot_persist(312)  # waits 299.66s
+        progress = [r.message for r in caplog.records if "Persisting tryboot configuration in" in r.message]
+        assert len(progress) == 4  # after ~60s, 120s, 180s and 240s
+
+    def test_returns_whether_the_boot_config_is_settled(self, booted_from, monkeypatch):
+        booted_from(3, tryboot_active=True)
+        monkeypatch.setattr(daemon, "get_system_uptime", lambda: 900.0)
+        with patch.object(daemon, "persist_boot_configuration", return_value=True):
+            assert daemon.handle_tryboot_persist(600) is True
+        with patch.object(daemon, "persist_boot_configuration", return_value=False):
+            assert daemon.handle_tryboot_persist(600) is False
+        booted_from(2, tryboot_active=False)
+        assert daemon.handle_tryboot_persist(600) is True
+
     def test_shutdown_during_wait_does_not_persist(self, booted_from, monkeypatch):
         booted_from(3, tryboot_active=True)
         monkeypatch.setattr(daemon, "get_system_uptime", lambda: 0.0)

@@ -278,7 +278,8 @@ def handle_tryboot_persist(timeout: int) -> bool:
         logger.info(f"Waiting {remaining_wait:.1f} seconds before persisting (until uptime reaches {timeout}s)")
         
         # Sleep in small intervals to allow signal handling
-        elapsed = 0
+        elapsed = 0.0
+        last_progress = 0.0
         while elapsed < remaining_wait:
             if _shutdown_requested:
                 logger.info("Shutdown requested during tryboot persist wait - exiting")
@@ -288,8 +289,11 @@ def handle_tryboot_persist(timeout: int) -> bool:
             time.sleep(sleep_time)
             elapsed += sleep_time
             
+            # A progress line about once a minute. (The remaining time is a float derived from
+            # /proc/uptime, so testing it for an exact multiple of 60 practically never matched.)
             remaining = remaining_wait - elapsed
-            if remaining > 0 and remaining % 60 == 0:
+            if remaining > 0 and elapsed - last_progress >= 60:
+                last_progress = elapsed
                 uptime_at_persist = uptime + remaining_wait
                 logger.info(f"Persisting tryboot configuration in {remaining:.0f} seconds (at uptime {uptime_at_persist:.0f}s)...")
     
