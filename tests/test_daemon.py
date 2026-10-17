@@ -246,11 +246,6 @@ class TestMainLoop:
             self.run_one_iteration(monkeypatch, cfg, maintenance_entry={"name": "maintenance"}, in_window=True, update="https://u")
         wf.assert_called_once()
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG: outside the maintenance window the daemon sleeps a full check_interval, so a window "
-        "shorter than check_interval can be skipped entirely and updates never get applied",
-    )
     def test_does_not_sleep_past_next_maintenance_window(self, monkeypatch):
         cfg = {"check_interval": 3600, "do": "check", "maintenance_check_interval": 60, "maintenance_do": "apply"}
         monkeypatch.setattr(
@@ -271,3 +266,32 @@ class TestMainLoop:
         daemon.main_loop(cfg, maintenance_entry={"name": "maintenance"})
         # There must be a check at (or shortly after) the window start at t=600s.
         assert any(600 <= t <= 660 for t in checks), checks
+
+
+class TestNextCheckDelay:
+    ENTRY = {"name": "maintenance", "start": "02:00", "stop": "02:30"}
+
+    def delay(self, monkeypatch, until, mode="check", in_window=False, entry=ENTRY, interval=3600):
+        monkeypatch.setattr(
+            daemon,
+            "get_next_maintenance_window_start",
+            lambda e: None if until is None else datetime.now() + timedelta(seconds=until),
+        )
+        return daemon.next_check_delay(interval, mode, entry, in_window)
+
+    def test_no_schedule_or_inside_window_uses_interval(self, monkeypatch):
+        assert self.delay(monkeypatch, 600, entry=None) == 3600
+        assert self.delay(monkeypatch, 600, in_window=True) == 3600
+
+    def test_capped_at_next_window(self, monkeypatch):
+        assert self.delay(monkeypatch, 600) == pytest.approx(601, abs=2)
+
+    def test_distant_window_keeps_interval(self, monkeypatch):
+        assert self.delay(monkeypatch, 36000) == 3600
+
+    def test_nothing_mode_sleeps_until_window(self, monkeypatch):
+        assert self.delay(monkeypatch, 36000, mode="nothing") == pytest.approx(36001, abs=2)
+
+    @pytest.mark.parametrize("until", [None, -5, 0])
+    def test_unknown_or_past_start_uses_interval(self, monkeypatch, until):
+        assert self.delay(monkeypatch, until) == 3600

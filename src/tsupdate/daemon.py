@@ -342,6 +342,55 @@ def countdown_with_cancel(seconds: int) -> bool:
     return True
 
 
+def sleep_interruptible(seconds: float) -> None:
+    """Sleep in small steps so SIGTERM/SIGINT stop the daemon promptly."""
+    elapsed = 0.0
+    while elapsed < seconds and not _shutdown_requested:
+        sleep_time = min(10, seconds - elapsed)
+        time.sleep(sleep_time)
+        elapsed += sleep_time
+
+
+def _seconds_until(moment: datetime) -> float:
+    now = datetime.now(moment.tzinfo) if moment.tzinfo else datetime.now()
+    return (moment - now).total_seconds()
+
+
+def next_check_delay(
+    check_interval: float, do_mode: str, maintenance_entry: Optional[dict], in_maintenance_window: bool
+) -> float:
+    """
+    Seconds to wait until the next update check.
+
+    Outside the maintenance window the delay is capped at the start of the next
+    window. Otherwise a window shorter than check_interval could fall entirely
+    between two checks and updates would never be applied. In mode "nothing"
+    there is nothing to check outside the window, so the daemon sleeps until
+    the window opens, however far away that is.
+    """
+    if not maintenance_entry or in_maintenance_window:
+        return check_interval
+
+    next_start = get_next_maintenance_window_start(maintenance_entry)
+    if next_start is None:
+        logger.warning("Could not determine next maintenance window, using check_interval")
+        return check_interval
+
+    # +1s so the check lands inside the window rather than right at its edge
+    until_window = _seconds_until(next_start) + 1
+    if until_window <= 1:
+        logger.warning("Next maintenance window start is in the past, using check_interval")
+        return check_interval
+
+    if do_mode == "nothing" or until_window < check_interval:
+        logger.info(
+            f"Next maintenance window starts at {next_start.strftime('%Y-%m-%d %H:%M:%S %Z')} "
+            f"({until_window:.0f} seconds)"
+        )
+        return until_window
+    return check_interval
+
+
 def download_update(update_url: str, config: dict) -> Optional[Path]:
     """
     Download update file.
@@ -646,44 +695,9 @@ def main_loop(config: dict, maintenance_entry: Optional[dict] = None) -> None:
                 else:
                     logger.debug(f"Mode is 'nothing' - skipping check")
                 
-                # If outside maintenance window, wait until next maintenance window starts
-                if maintenance_entry and not in_maintenance_window:
-                    next_start = get_next_maintenance_window_start(maintenance_entry)
-                    if next_start:
-                        now = datetime.now(next_start.tzinfo) if next_start.tzinfo else datetime.now()
-                        sleep_seconds = (next_start - now).total_seconds()
-                        if sleep_seconds > 0:
-                            logger.info(f"Waiting until next maintenance window starts at {next_start.strftime('%Y-%m-%d %H:%M:%S %Z')} ({sleep_seconds:.0f} seconds)")
-                            elapsed = 0
-                            while elapsed < sleep_seconds and not _shutdown_requested:
-                                sleep_time = min(10, sleep_seconds - elapsed)
-                                time.sleep(sleep_time)
-                                elapsed += sleep_time
-                        else:
-                            # Next start is in the past (shouldn't happen, but handle gracefully)
-                            logger.warning("Next maintenance window start is in the past, using check_interval")
-                            elapsed = 0
-                            while elapsed < check_interval and not _shutdown_requested:
-                                sleep_time = min(10, check_interval - elapsed)
-                                time.sleep(sleep_time)
-                                elapsed += sleep_time
-                    else:
-                        # Could not determine next maintenance window, fall back to check_interval
-                        logger.warning("Could not determine next maintenance window, using check_interval")
-                        logger.info(f"Next update check in {check_interval} seconds")
-                        elapsed = 0
-                        while elapsed < check_interval and not _shutdown_requested:
-                            sleep_time = min(10, check_interval - elapsed)
-                            time.sleep(sleep_time)
-                            elapsed += sleep_time
-                else:
-                    # Inside window or no schedule - use check_interval
-                    logger.info(f"Next update check in {check_interval} seconds")
-                    elapsed = 0
-                    while elapsed < check_interval and not _shutdown_requested:
-                        sleep_time = min(10, check_interval - elapsed)
-                        time.sleep(sleep_time)
-                        elapsed += sleep_time
+                delay = next_check_delay(check_interval, do_mode, maintenance_entry, in_maintenance_window)
+                logger.info(f"Next update check in {delay:.0f} seconds")
+                sleep_interruptible(delay)
                 continue
             
             # Check for available updates
@@ -742,14 +756,9 @@ def main_loop(config: dict, maintenance_entry: Optional[dict] = None) -> None:
                 logger.info("No updates available")
             
             # Sleep until next check
-            logger.info(f"Next update check in {check_interval} seconds")
-            
-            # Sleep in small intervals to allow signal handling
-            elapsed = 0
-            while elapsed < check_interval and not _shutdown_requested:
-                sleep_time = min(10, check_interval - elapsed)
-                time.sleep(sleep_time)
-                elapsed += sleep_time
+            delay = next_check_delay(check_interval, do_mode, maintenance_entry, in_maintenance_window)
+            logger.info(f"Next update check in {delay:.0f} seconds")
+            sleep_interruptible(delay)
             
         except Exception as e:
             logger.error(f"Error in main loop: {e}", exc_info=True)

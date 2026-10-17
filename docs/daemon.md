@@ -243,7 +243,9 @@ When the daemon is about to reboot, it broadcasts a message via `wall` showing:
 
 ### Update Check Loop
 
-1. **Check Timer**: Wait for `check_interval` seconds (sleeping in small increments)
+1. **Check Timer**: Wait for `check_interval` seconds (sleeping in small increments). Outside the
+   maintenance window the wait is shortened so the next check happens when the window opens, even if the
+   window is shorter than `check_interval`
 2. **Maintenance Window Check**: If maintenance schedule configured, determine if in window
 3. **Mode Check**: If outside window and mode is `nothing`, skip to step 1 (don't check)
 4. **Query GitHub**: Fetch releases from repository
