@@ -243,7 +243,7 @@ sudo tsupdate apply https://github.com/private-org/repo/releases/download/...
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.13+ (as shipped by Debian 13 "trixie")
 - Raspberry Pi with tryboot support (Pi 4, 400, CM4, Pi 5)
 - A/B partition layout - mmcblk0p2 (rootfs) and mmcblk0p3 (clonefs)
 - Root privileges for most operations

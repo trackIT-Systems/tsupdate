@@ -7,7 +7,7 @@ name = "tsupdate"
 version = "2025.12.1"
 description = "Update daemon for tsOS-based devices using pidiff and Raspberry Pi tryboot"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 authors = [
     {name = "Jonas Höchst", email = "hoechst@trackit.systems"}
 ]
@@ -17,25 +17,28 @@ classifiers = [
     "Intended Audience :: System Administrators",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: System :: Systems Administration",
 ]
 
+# Minimum versions are those shipped by Debian 13 (trixie): python3-github,
+# python3-yaml and python3-requests. scheduleparse is not packaged in Debian.
 dependencies = [
-    "PyGithub>=2.0.0",
-    "PyYAML>=6.0.0",
-    "requests>=2.31.0",
+    "PyGithub>=2.6.1",
+    "PyYAML>=6.0.2",
+    "requests>=2.32.3",
     "scheduleparse @ git+https://github.com/trackIT-Systems/scheduleparse.git@2025.10.1",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0.0",
-    "pytest-cov>=4.0.0",
+    "pytest>=8.3.5",
+    "pytest-cov>=6.0.0",
     "black>=23.0.0",
     "ruff>=0.1.0",
-    "mypy>=1.0.0",
+    "mypy>=1.15.0",
+    "types-PyYAML>=6.0.0",
+    "types-requests>=2.32.0",
 ]
 
 [project.scripts]
@@ -51,15 +54,14 @@ where = ["src"]
 
 [tool.black]
 line-length = 120
-target-version = ["py311"]
+target-version = ["py313"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py313"
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
-
