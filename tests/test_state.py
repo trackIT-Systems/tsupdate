@@ -28,9 +28,13 @@ def test_blocked_only_after_max_attempts():
     assert not state.is_blocked("u", "1.1")
 
 
+def test_block_is_immediate():
+    state.block("u", "1.0")
+    assert state.is_blocked("u", "1.0")
+
+
 def test_stale_record_dropped_once_version_changes():
-    for _ in range(state.MAX_UPDATE_ATTEMPTS):
-        state.record_attempt("u", "1.0")
+    state.block("u", "1.0")
     state.forget_if_version_changed("1.0")
     assert state.is_blocked("u", "1.0")
     state.forget_if_version_changed("1.1")
@@ -38,8 +42,7 @@ def test_stale_record_dropped_once_version_changes():
 
 
 def test_unknown_version_never_clears_state():
-    for _ in range(state.MAX_UPDATE_ATTEMPTS):
-        state.record_attempt("u", "1.0")
+    state.block("u", "1.0")
     state.forget_if_version_changed(None)
     assert state.is_blocked("u", "1.0")
 

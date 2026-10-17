@@ -67,6 +67,11 @@ def record_attempt(update_url: str, from_version: Optional[str]) -> int:
     return attempts
 
 
+def block(update_url: str, from_version: Optional[str]) -> None:
+    """Mark an update as not to be applied again from `from_version` (e.g. cancelled by the operator)."""
+    _save({"update_url": update_url, "from_version": from_version, "attempts": MAX_UPDATE_ATTEMPTS})
+
+
 def discard_attempt() -> None:
     """Forget the recorded attempt (e.g. the reboot was never actually initiated)."""
     try:

@@ -355,3 +355,36 @@ class TestFailedUpdateDoesNotLoop:
         monkeypatch.setattr(daemon, "execute_tryboot", lambda **kw: 1)
         assert not daemon.sync_and_apply_update(tmp_path / "u.tar", self.CFG, "https://u")
         assert update_state._load() == {}
+
+
+class TestCancellation:
+    CFG = {"update_countdown": 30, "rsync_timeout": 1}
+
+    @pytest.fixture
+    def pipeline(self, monkeypatch, no_wall):
+        monkeypatch.setattr(daemon, "execute_syncroot", lambda **kw: 0)
+        monkeypatch.setattr(daemon, "execute_apply", lambda *a, **kw: 0)
+
+    def test_sigterm_in_countdown_cancels_and_is_remembered(self, pipeline, monkeypatch, tmp_path):
+        monkeypatch.setattr(daemon.time, "sleep", lambda s: daemon.signal_handler(15, None))
+        with patch.object(daemon, "execute_tryboot") as tb:
+            assert not daemon.sync_and_apply_update(tmp_path / "u.tar", self.CFG, "https://u")
+        tb.assert_not_called()
+        # systemd restarts the daemon after it exits: it must not pick the same update up again
+        assert update_state.is_blocked("https://u", "2025.12.3")
+
+    def test_restarted_daemon_does_not_reapply_cancelled_update(self, pipeline, monkeypatch, tmp_path):
+        update_state.block("https://u", "2025.12.3")
+        monkeypatch.setattr(daemon, "check_for_updates", lambda c: "https://u")
+        monkeypatch.setattr(daemon.time, "sleep", lambda s: setattr(daemon, "_shutdown_requested", True))
+        with patch.object(daemon, "apply_update_workflow") as wf:
+            daemon.main_loop({"check_interval": 60, "do": "apply"})
+        wf.assert_not_called()
+
+    def test_sigterm_during_apply_prevents_the_reboot(self, pipeline, monkeypatch, tmp_path):
+        """SIGTERM arrives while rsync is still running (before the countdown starts)."""
+        monkeypatch.setattr(daemon, "execute_apply", lambda *a, **kw: daemon.signal_handler(15, None) or 0)
+        monkeypatch.setattr(daemon.time, "sleep", lambda s: None)
+        with patch.object(daemon, "execute_tryboot") as tb:
+            assert not daemon.sync_and_apply_update(tmp_path / "u.tar", self.CFG, "https://u")
+        tb.assert_not_called()

@@ -190,12 +190,12 @@ def signal_handler(signum: int, frame) -> None:
     signal_name = signal.Signals(signum).name
     logger.info(f"Received signal {signal_name}")
     
-    # If we're in countdown, cancel the update
-    if _cancel_update is not None:
-        logger.info("Cancelling update...")
-        _cancel_update = True
+    # Cancels a pending reboot countdown (a no-op at any other time) ...
+    _cancel_update = True
     
-    # Mark shutdown as requested
+    # ... and stops the daemon. A cancelled update is remembered across the
+    # restart by sync_and_apply_update(), so systemd restarting the daemon does
+    # not simply start the same update again.
     _shutdown_requested = True
 
 
@@ -323,7 +323,9 @@ def countdown_with_cancel(seconds: int) -> bool:
     logger.info(f"Starting countdown: {seconds} seconds until reboot")
     
     for remaining in range(seconds, 0, -1):
-        if _cancel_update:
+        # _shutdown_requested also covers a SIGTERM that arrived while the update was
+        # still being applied, before this countdown started.
+        if _cancel_update or _shutdown_requested:
             logger.info("Update cancelled by signal")
             _cancel_update = False
             return False
@@ -599,6 +601,14 @@ def sync_and_apply_update(update_file_path: Path, config: dict, update_url: Opti
         # Step 4: Countdown with cancellation support
         if not countdown_with_cancel(countdown):
             logger.info("Update cancelled - system will not reboot")
+            if update_url:
+                # Remember the cancellation: the daemon stops on this signal and systemd
+                # restarts it, which would otherwise just apply the same update again.
+                update_state.block(update_url, _running_version())
+                logger.info(
+                    f"This update will not be applied again automatically; "
+                    f"remove {update_state.STATE_FILE} to allow it"
+                )
             notify_users("Update cancelled - system will not reboot. Update remains on inactive partition.")
             return False
         

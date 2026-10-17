@@ -224,6 +224,14 @@ PID=$(pgrep -f tsupdated)
 sudo kill -TERM $PID
 ```
 
+A cancelled update is remembered in `/data/tsupdate-state.json` and is **not** applied again
+automatically (systemd restarts the daemon after it stops, so it would otherwise start the same update
+again). A newer release is picked up normally. To re-allow the cancelled update, remove the file:
+
+```bash
+sudo rm /data/tsupdate-state.json
+```
+
 **From wall message:**
 
 When the daemon is about to reboot, it broadcasts a message via `wall` showing:
@@ -354,7 +362,10 @@ All exceptions are caught, logged with full stack trace, and the daemon continue
 
 ### SIGTERM / SIGINT
 
-**During countdown**: Cancels the pending reboot, returns to main loop
+**During countdown**: Cancels the pending reboot and stops the daemon. The cancelled update is remembered
+(see [Cancelling Updates](#cancelling-updates)), so the daemon restarted by systemd does not apply it again.
+
+**While an update is being applied**: The update completes, but the reboot is not started.
 
 **During normal operation**: Initiates graceful shutdown
 
