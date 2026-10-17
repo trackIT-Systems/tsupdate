@@ -173,8 +173,10 @@ def setup_loopback(image_path: Path) -> Optional[str]:
     """
     try:
         logger.debug(f"Setting up loopback device for {image_path}")
+        # --partscan makes the kernel create the partition devices (/dev/loopNpM) itself;
+        # relying on partprobe alone fails where it is not installed.
         result = subprocess.run(
-            ["losetup", "--find", "--show", str(image_path)],
+            ["losetup", "--find", "--show", "--partscan", str(image_path)],
             capture_output=True,
             text=True,
             check=True,
@@ -182,7 +184,7 @@ def setup_loopback(image_path: Path) -> Optional[str]:
         loop_device = result.stdout.strip()
         logger.info(f"Created loopback device: {loop_device}")
         
-        # Scan for partitions (makes partition devices visible)
+        # Re-scan as a fallback for losetup versions that ignore --partscan
         try:
             subprocess.run(
                 ["partprobe", loop_device],

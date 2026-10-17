@@ -114,13 +114,18 @@ class TestLoopback:
             assert restore.setup_loopback("/data/x.img") == "/dev/loop3"
         assert run.call_args_list[0].args[0][0] == "losetup"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG: losetup is called without --partscan; partition devices only appear if partprobe "
-        "happens to be installed",
-    )
     def test_loopback_scans_partitions_itself(self):
+        """Partition devices must not depend on partprobe being installed."""
         with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="/dev/loop3\n")) as run:
             restore.setup_loopback("/data/x.img")
         losetup_args = run.call_args_list[0].args[0]
-        assert "-P" in losetup_args or "--partscan" in losetup_args
+        assert "--partscan" in losetup_args or "-P" in losetup_args
+
+    def test_works_without_partprobe(self):
+        def fake_run(cmd, **kw):
+            if cmd[0] == "partprobe":
+                raise FileNotFoundError
+            return subprocess.CompletedProcess(cmd, 0, stdout="/dev/loop3\n")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            assert restore.setup_loopback("/data/x.img") == "/dev/loop3"

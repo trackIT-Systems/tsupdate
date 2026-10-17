@@ -136,7 +136,7 @@ The module uses Linux loopback devices to access partitions within image files:
 /dev/loop0p3   -> alternate root partition
 ```
 
-The `partprobe` command scans for partitions after loopback setup. If not available, partition devices should still be accessible.
+The loopback device is created with `losetup --partscan`, so the kernel creates the partition devices itself. `partprobe` is run afterwards only as a fallback and does not need to be installed.
 
 ## Partition Selection
 
