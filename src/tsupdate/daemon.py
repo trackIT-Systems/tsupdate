@@ -37,6 +37,25 @@ _cancel_update = False
 _shutdown_requested = False
 
 
+def _validate_int_option(config: dict, key: str, minimum: int, default: int) -> None:
+    """
+    Check that config[key] is an integer >= minimum.
+
+    A value of the wrong type is a configuration error and ends the daemon, like check_interval.
+    A number below the minimum is replaced by the default, like a negative rsync_timeout.
+    """
+    value = config.get(key)
+    if value is None:
+        config[key] = default
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
+        logger.error(f"{key} must be an integer (got {type(value).__name__}: {value!r})")
+        sys.exit(1)
+    if value < minimum:
+        logger.warning(f"{key} ({value}) must be at least {minimum}; using default {default}")
+        config[key] = default
+
+
 def load_config(config_path: Path) -> dict:
     """
     Load and parse YAML configuration file.
@@ -163,6 +182,10 @@ def load_config(config_path: Path) -> dict:
             )
             rsync_timeout = DEFAULT_RSYNC_TIMEOUT_SEC
         config["rsync_timeout"] = rsync_timeout
+        
+        _validate_int_option(config, "update_countdown", minimum=0, default=default_config["update_countdown"])
+        _validate_int_option(config, "persist_timeout", minimum=0, default=default_config["persist_timeout"])
+        _validate_int_option(config, "max_releases", minimum=1, default=default_config["max_releases"])
         
         logger.info(f"Loaded configuration from {config_path}")
         logger.debug(f"Configuration: {config}")

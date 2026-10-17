@@ -67,6 +67,27 @@ class TestLoadConfig:
         assert cfg["check_interval"] == 60
         assert cfg["maintenance_check_interval"] == 60
 
+    def test_zero_countdown_and_persist_timeout_are_valid(self, tmp_path):
+        cfg = daemon.load_config(write_config(tmp_path, "update_countdown: 0\npersist_timeout: 0\n"))
+        assert cfg["update_countdown"] == 0
+        assert cfg["persist_timeout"] == 0
+
+    @pytest.mark.parametrize(
+        "text,key,default",
+        [
+            ("update_countdown: -5\n", "update_countdown", 60),
+            ("persist_timeout: -1\n", "persist_timeout", 600),
+            ("max_releases: 0\n", "max_releases", 5),
+            ("max_releases: -1\n", "max_releases", 5),  # releases[:-1] would silently drop the newest
+        ],
+    )
+    def test_out_of_range_values_use_the_default(self, tmp_path, text, key, default):
+        assert daemon.load_config(write_config(tmp_path, text))[key] == default
+
+    def test_null_values_use_the_default(self, tmp_path):
+        cfg = daemon.load_config(write_config(tmp_path, "update_countdown:\nmax_releases: ~\n"))
+        assert (cfg["update_countdown"], cfg["max_releases"]) == (60, 5)
+
     def test_negative_rsync_timeout_uses_default(self, tmp_path):
         assert daemon.load_config(write_config(tmp_path, "rsync_timeout: -1\n"))["rsync_timeout"] == 3600
 
@@ -74,6 +95,11 @@ class TestLoadConfig:
         "text",
         [
             "- a list\n",
+            "update_countdown: soon\n",
+            "update_countdown: 1.5\n",
+            "persist_timeout: '10m'\n",
+            "max_releases: five\n",
+            "max_releases: true\n",
             "check_interval: soon\n",
             "maintenance_check_interval: 1.5\n",
             "rsync_timeout: true\n",

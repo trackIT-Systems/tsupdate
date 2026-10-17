@@ -87,16 +87,19 @@ Configuration is stored in YAML format. Default location: `/boot/firmware/tsupda
 **`max_releases`** (integer, default: 5)
 - Maximum number of recent releases to check for batch updates
 - Higher values check more releases but use more API calls
+- Must be an integer of at least 1 (smaller values fall back to the default)
 
 **`persist_timeout`** (integer, default: 600)
 - System uptime threshold (in seconds) before persisting tryboot configuration
 - When booted via tryboot, waits until system uptime reaches this value before persisting
 - Allows time to verify update was successful, regardless of when daemon starts
+- Must be an integer, 0 or more (negative values fall back to the default)
 - Example: `600` (10 minutes), `300` (5 minutes)
 
 **`update_countdown`** (integer, default: 60)
 - Seconds to wait before rebooting after applying update
 - Users can cancel during this countdown
+- Must be an integer, 0 or more (negative values fall back to the default); `0` reboots without a countdown
 - Example: `60` (1 minute), `300` (5 minutes)
 
 **`do`** (string, default: "check")
@@ -687,4 +690,3 @@ sudo kill -TERM $(pgrep -f tsupdated)
 ## Authors
 
 Jonas Höchst <hoechst@trackit.systems>
-
