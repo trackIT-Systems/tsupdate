@@ -20,9 +20,12 @@ retroactively on the last commit of their month. Everything newer is unreleased.
 - Only fetch as many releases as are searched instead of paging through all of them.
 - Log the tryboot persist countdown about once a minute.
 - Rewrite the README.
+- Upgrade `actions/checkout` and `actions/setup-python` to v7.
 - Pin update sources to the trackIT-Systems GitHub org, with tests for the org pin and cache verification.
 
 ### Fixed
+- Extract update archives to `/data/tsupdate/extract` instead of `/tmp`, remove the directory when extraction fails, and reject members that would escape it (`filter="data"`) (#7).
+- Fix the atime assertion in the persist test.
 - Stop re-applying an update that failed to boot (reboot loop).
 - Make cancelling an update with SIGTERM stick.
 - Write boot files atomically so a power cut cannot leave a truncated `cmdline.txt`.

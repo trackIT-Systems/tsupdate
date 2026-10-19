@@ -1,11 +1,8 @@
 """Tests for pidiff archive handling and the rsync batch invocation in apply.py."""
 
-import glob
 import io
-import os
 import subprocess
 import tarfile
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -72,34 +69,49 @@ class TestBatchSh:
         assert apply.extract_rsync_command_from_batch_sh(tmp_path / "batch.sh") is None
 
 
+@pytest.fixture(autouse=True)
+def extract_dir(tmp_path, monkeypatch):
+    path = tmp_path / "data" / "extract"
+    monkeypatch.setattr(apply, "EXTRACT_DIR", path)
+    return path
+
+
 class TestArchive:
-    def test_extract_and_find_batch_file(self, tmp_path):
+    def test_extract_and_find_batch_file(self, tmp_path, extract_dir):
         archive = make_update_tar(tmp_path)
         extracted = apply.extract_update_archive(archive)
-        try:
-            assert (extracted / "batch.sh").read_text() == BATCH_SH
-            assert apply.find_rsync_batch_file(extracted, archive.name) == extracted / BATCH_NAME
-            # Falls back to "any non-.sh file" when the archive was renamed
-            assert apply.find_rsync_batch_file(extracted, "renamed.tar") == extracted / BATCH_NAME
-        finally:
-            import shutil
+        assert extracted == extract_dir
+        assert (extracted / "batch.sh").read_text() == BATCH_SH
+        assert apply.find_rsync_batch_file(extracted, archive.name) == extracted / BATCH_NAME
+        # Falls back to "any non-.sh file" when the archive was renamed
+        assert apply.find_rsync_batch_file(extracted, "renamed.tar") == extracted / BATCH_NAME
 
-            shutil.rmtree(extracted)
-
-    def test_extract_missing_file(self, tmp_path):
+    def test_extract_missing_file(self, tmp_path, extract_dir):
         assert apply.extract_update_archive(tmp_path / "nope.tar") is None
+        assert not extract_dir.exists()
 
-    @pytest.mark.xfail(strict=True, reason="BUG: extract_update_archive leaks its mkdtemp() dir when tar fails")
-    def test_corrupt_archive_does_not_leak_temp_dir(self, tmp_path):
+    def test_corrupt_archive_does_not_leak_extract_dir(self, tmp_path, extract_dir):
         bad = tmp_path / "bad.tar"
         bad.write_bytes(b"this is not a tar archive")
-        pattern = os.path.join(tempfile.gettempdir(), "tsupdate_apply_*")
-        before = set(glob.glob(pattern))
         assert apply.extract_update_archive(bad) is None
-        leaked = set(glob.glob(pattern)) - before
-        for d in leaked:
-            os.rmdir(d)
-        assert not leaked
+        assert not extract_dir.exists()
+
+    def test_leftovers_are_wiped_before_extracting(self, tmp_path, extract_dir):
+        extract_dir.mkdir(parents=True)
+        (extract_dir / "stale").write_text("from an interrupted run")
+        assert apply.extract_update_archive(make_update_tar(tmp_path)) == extract_dir
+        assert not (extract_dir / "stale").exists()
+
+    def test_member_escaping_the_directory_is_rejected(self, tmp_path, extract_dir):
+        archive = tmp_path / "evil.tar"
+        with tarfile.open(archive, "w") as tar:
+            info = tarfile.TarInfo("../escaped.txt")
+            data = b"x"
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        assert apply.extract_update_archive(archive) is None
+        assert not (extract_dir.parent / "escaped.txt").exists()
+        assert not extract_dir.exists()
 
 
 class TestVersionCompatibility:

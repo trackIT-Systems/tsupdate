@@ -24,7 +24,7 @@ Update archives contain:
 
 ### Archive Processing
 
-**`extract_update_archive(archive_path)`**: Extract tar archive to temporary directory.
+**`extract_update_archive(archive_path)`**: Extract tar archive to `/data/tsupdate/extract` (wiped first, removed on failure; members are extracted with `filter="data"`).
 
 **`parse_batch_metadata(batch_sh_path)`**: Parse metadata variables from `batch.sh`.
 
@@ -48,7 +48,7 @@ Update archives contain:
 
 1. **Validation** - Check boot state (regular or persisted tryboot)
 2. **Download** - Fetch update archive from URL (or use local file)
-3. **Extract** - Extract tar archive to temporary directory
+3. **Extract** - Extract tar archive to `/data/tsupdate/extract`
 4. **Parse Metadata** - Read version info from `batch.sh`
 5. **Mount** - Mount inactive partition to `/media/root-up`
 6. **Version Check** - Verify base version matches target partition

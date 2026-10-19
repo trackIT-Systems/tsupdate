@@ -6,7 +6,6 @@ import shlex
 import shutil
 import subprocess
 import tarfile
-import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -21,38 +20,44 @@ from tsupdate.utils import ARTIFACTS_DIR, ensure_file, resolve_rsync_timeout_sec
 
 logger = logging.getLogger(__name__)
 
+EXTRACT_DIR = ARTIFACTS_DIR / "extract"
+
 
 def extract_update_archive(archive_path: Path) -> Optional[Path]:
     """
-    Extract tar archive to temporary directory.
-    
+    Extract tar archive to EXTRACT_DIR.
+
+    The archive is extracted below /data rather than the default temp dir, since /tmp may be
+    RAM-backed on a read-only root. EXTRACT_DIR is wiped first, so leftovers from an
+    interrupted run never pile up, and it is removed again if extraction fails.
+    Members are extracted with filter="data", so paths and links cannot escape the directory.
+
     Args:
         archive_path: Path to tar archive file
-        
+
     Returns:
         Path to extracted directory, or None on error
     """
     if not archive_path.exists():
         logger.error(f"Update file does not exist: {archive_path}")
         return None
-    
+
     try:
-        # Create temporary directory
-        temp_dir = tempfile.mkdtemp(prefix="tsupdate_apply_")
-        temp_path = Path(temp_dir)
-        logger.debug(f"Created temporary directory: {temp_path}")
-        
-        # Extract tar archive
-        with tarfile.open(archive_path, "r:*") as tar:
-            tar.extractall(temp_path)
-        logger.debug(f"Extracted archive {archive_path} to {temp_path}")
-        
-        return temp_path
-    except tarfile.TarError as e:
-        logger.error(f"Could not extract archive {archive_path}: {e}")
-        return None
+        shutil.rmtree(EXTRACT_DIR, ignore_errors=True)
+        EXTRACT_DIR.mkdir(parents=True, mode=0o700)
+        logger.debug(f"Created extraction directory: {EXTRACT_DIR}")
     except OSError as e:
-        logger.error(f"Could not create temporary directory: {e}")
+        logger.error(f"Could not create extraction directory {EXTRACT_DIR}: {e}")
+        return None
+
+    try:
+        with tarfile.open(archive_path, "r:*") as tar:
+            tar.extractall(EXTRACT_DIR, filter="data")
+        logger.debug(f"Extracted archive {archive_path} to {EXTRACT_DIR}")
+        return EXTRACT_DIR
+    except (tarfile.TarError, OSError) as e:
+        logger.error(f"Could not extract archive {archive_path}: {e}")
+        shutil.rmtree(EXTRACT_DIR, ignore_errors=True)
         return None
 
 
