@@ -94,10 +94,11 @@ class TestPersist:
         (boot_dir / "tryline.txt").write_text("root=/dev/mmcblk0p3 rootwait\n")
 
         assert tryboot.persist_boot_configuration()
-        assert cmdline.read_text() == "root=/dev/mmcblk0p3 rootwait\n"
+        # stat before reading: with relatime, reading the file would bump atime itself
         st = cmdline.stat()
         assert st.st_mtime == 1_000_000_000
         assert st.st_atime == 1_000_000_000
+        assert cmdline.read_text() == "root=/dev/mmcblk0p3 rootwait\n"
         assert tryboot.is_tryboot_persisted()
 
     def test_persist_without_tryline_fails_and_keeps_cmdline(self, boot_dir):
