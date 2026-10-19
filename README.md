@@ -267,7 +267,7 @@ Module reference in [`docs/`](docs/): [daemon](docs/daemon.md), [status](docs/st
 
 ## Version scheme
 
-`YEAR.MONTH.COUNT`, e.g. `2025.12.1`.
+[CalVer](https://calver.org) as `YEAR.MONTH.COUNT`, e.g. `2025.12.1`. See the [changelog](CHANGELOG.md) for what changed in each version.
 
 ## Authors
 
