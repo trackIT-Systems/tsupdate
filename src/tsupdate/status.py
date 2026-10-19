@@ -152,6 +152,9 @@ def get_root_partition_from_cmdline() -> Optional[str]:
     root = cmdline.get("root")
     
     if root:
+        # PARTUUID=/UUID=/LABEL= roots are not resolved; callers treat None as "unknown"
+        if "=" in root:
+            return None
         # Normalize to full path if it's a relative device name
         if not root.startswith("/"):
             root = f"/dev/{root}"
@@ -250,34 +253,52 @@ def get_booted_partition() -> Optional[Tuple[str, int, str]]:
     return (device, partition_num, label)
 
 
+# Partition 2 / 3 of the same disk: mmcblk0p2, nvme0n1p2 (digit-ending disks use a "p" separator), sda2, vda2
+_PARTITION_DEVICE_RE = re.compile(r"^(/dev/(?:[a-z]+\d+(?:n\d+)?p|(?:sd|vd|xvd|hd)[a-z]+))(\d+)$")
+
+ROOT_PARTITIONS = {2: "rootfs", 3: "clonefs"}
+
+
+def get_sibling_partition_device(device: str, partition_num: int) -> Optional[str]:
+    """
+    Get the device path of another partition on the same disk.
+
+    Args:
+        device: Partition device path (e.g., '/dev/nvme0n1p2')
+        partition_num: Partition number on the same disk
+
+    Returns:
+        Device path (e.g., '/dev/nvme0n1p3') or None if device is not a recognised partition device
+    """
+    match = _PARTITION_DEVICE_RE.match(device or "")
+    if not match:
+        return None
+    return f"{match.group(1)}{partition_num}"
+
+
 def get_inactive_partition() -> Optional[Tuple[str, int, str]]:
     """
-    Get the inactive (non-booted) partition.
-    
+    Get the inactive (non-booted) partition: the other root partition (p2 <-> p3)
+    on the same disk as the booted one.
+
     Returns:
         Tuple of (device_path, partition_number, label) or None
     """
     booted = get_booted_partition()
     if not booted:
         return None
-    
-    _, booted_num, _ = booted
-    
-    # If rootfs (p2) is booted, inactive is clonefs (p3)
-    if booted_num == 2:
-        device = "/dev/mmcblk0p3"
-        partition_num = 3
-        label = get_partition_label(device) or "clonefs"
-        return (device, partition_num, label)
-    
-    # If clonefs (p3) is booted, inactive is rootfs (p2)
-    if booted_num == 3:
-        device = "/dev/mmcblk0p2"
-        partition_num = 2
-        label = get_partition_label(device) or "rootfs"
-        return (device, partition_num, label)
-    
-    return None
+
+    booted_device, booted_num, _ = booted
+    if booted_num not in ROOT_PARTITIONS:
+        return None
+
+    partition_num = 5 - booted_num  # 2 <-> 3
+    device = get_sibling_partition_device(booted_device, partition_num)
+    if not device:
+        return None
+
+    label = get_partition_label(device) or ROOT_PARTITIONS[partition_num]
+    return (device, partition_num, label)
 
 
 def get_inactive_partition_info() -> Optional[dict]:

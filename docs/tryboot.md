@@ -24,13 +24,13 @@ Located in `/boot/firmware/`:
 
 **`get_target_partition()`**: Determine target partition for tryboot (switches between 2 and 3).
 
-**`modify_cmdline_partition(cmdline, target_partition)`**: Modify cmdline string to use target partition.
+**`modify_cmdline_root(cmdline, target_device)`**: Replace the `root=` parameter with the target device (unchanged if there is none).
 
 **`is_tryboot_persisted()`**: Check if tryboot config matches current cmdline (indicates persistence).
 
 ### Tryboot Configuration
 
-**`copy_and_modify_cmdline(target_partition, target_label)`**: Create `tryline.txt` with switched partition.
+**`copy_and_modify_cmdline(target_device, target_partition, target_label)`**: Create `tryline.txt` with switched root; fails if `cmdline.txt` has no `root=`.
 
 **`copy_config_to_tryboot()`**: Copy `config.txt` to `tryboot.txt`.
 

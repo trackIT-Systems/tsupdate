@@ -28,7 +28,7 @@ This module is responsible for gathering information about the current system st
 
 **`get_booted_partition()`**: Returns tuple of `(device, partition_num, label)` for the currently active partition.
 
-**`get_inactive_partition()`**: Returns tuple of `(device, partition_num, label)` for the inactive partition.
+**`get_inactive_partition()`**: Returns tuple of `(device, partition_num, label)` for the inactive partition: p2 <-> p3 on the same disk as the booted root (`mmcblk`, `nvme`, `sd`, `vd`). `None` for a `root=PARTUUID=`/`UUID=`/`LABEL=` root or an unrecognised device.
 
 **`get_inactive_partition_info()`**: Returns inactive partition info as a dictionary.
 

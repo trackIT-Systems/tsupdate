@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
 
-from tsupdate.status import is_tryboot_active, get_booted_partition
+from tsupdate.status import is_tryboot_active, get_booted_partition, get_inactive_partition
 
 logger = logging.getLogger(__name__)
 
@@ -133,33 +133,27 @@ def read_cmdline_file() -> Optional[str]:
         return None
 
 
-def modify_cmdline_partition(cmdline: str, target_partition: int) -> str:
+def modify_cmdline_root(cmdline: str, target_device: str) -> str:
     """
-    Modify cmdline string to use target partition.
-    
+    Modify cmdline string to use target root device.
+
     Args:
         cmdline: Original cmdline string
-        target_partition: Target partition number (2 or 3)
-        
+        target_device: Target root device (e.g., '/dev/mmcblk0p3')
+
     Returns:
-        Modified cmdline string with root parameter updated
+        Modified cmdline string with the root parameter replaced. Unchanged if
+        there is no root= parameter.
     """
-    target_device = f"/dev/mmcblk0p{target_partition}"
-    
-    # Replace root= parameter
-    # Pattern matches: root=/dev/mmcblk0p2, root=mmcblk0p2, root=/dev/mmcblk0p3, etc.
-    pattern = r"root=(/dev/)?mmcblk0p[23]"
-    replacement = f"root={target_device}"
-    
-    modified = re.sub(pattern, replacement, cmdline)
-    return modified
+    return re.sub(r"(?<!\S)root=\S+", lambda _: f"root={target_device}", cmdline)
 
 
-def copy_and_modify_cmdline(target_partition: int, target_label: str) -> bool:
+def copy_and_modify_cmdline(target_device: str, target_partition: int, target_label: str) -> bool:
     """
     Copy cmdline.txt to tryline.txt and modify partition.
     
     Args:
+        target_device: Target root device (e.g., '/dev/mmcblk0p3')
         target_partition: Target partition number (2 or 3)
         target_label: Target partition label (e.g., "clonefs" or "rootfs")
         
@@ -172,8 +166,11 @@ def copy_and_modify_cmdline(target_partition: int, target_label: str) -> bool:
         return False
     
     # Modify the cmdline to use target partition
-    modified_cmdline = modify_cmdline_partition(cmdline_content, target_partition)
+    modified_cmdline = modify_cmdline_root(cmdline_content, target_device)
     logger.debug(f"Modified cmdline for partition {target_partition}: {modified_cmdline}")
+    if f"root={target_device}" not in modified_cmdline.split():
+        logger.error(f"No root= parameter in {CMDLINE_FILE}; cannot point tryboot at {target_device}")
+        return False
     
     # Write to tryline.txt
     try:
@@ -378,7 +375,6 @@ def rollback_tryboot(reboot: bool = True) -> int:
     _, current_partition_num, current_label = booted
     
     # Get the previous partition (the one we want to go back to)
-    from tsupdate.status import get_inactive_partition
     previous = get_inactive_partition()
     if not previous:
         logger.error("Could not determine previous partition")
@@ -396,7 +392,10 @@ def rollback_tryboot(reboot: bool = True) -> int:
         return 1
     
     # Modify cmdline to point to previous partition
-    modified_cmdline = modify_cmdline_partition(cmdline_content, previous_partition_num)
+    modified_cmdline = modify_cmdline_root(cmdline_content, previous_device)
+    if f"root={previous_device}" not in modified_cmdline.split():
+        logger.error(f"No root= parameter in {CMDLINE_FILE}; cannot point it at {previous_device}")
+        return 1
     
     # Write restored cmdline.txt
     try:
@@ -471,9 +470,11 @@ def execute_tryboot(reboot: bool = True) -> int:
         return 1
     
     target_partition = get_target_partition()
-    if target_partition is None:
+    target = get_inactive_partition()
+    if target_partition is None or target is None:
         logger.error("Could not determine target partition")
         return 1
+    target_device = target[0]
     
     # Get partition labels for user feedback
     booted = get_booted_partition()
@@ -484,7 +485,7 @@ def execute_tryboot(reboot: bool = True) -> int:
     logger.info(f"Target partition: {target_label} (p{target_partition})")
     
     # Copy and modify cmdline
-    if not copy_and_modify_cmdline(target_partition, target_label):
+    if not copy_and_modify_cmdline(target_device, target_partition, target_label):
         return 1
     
     # Copy config

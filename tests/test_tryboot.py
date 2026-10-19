@@ -12,26 +12,35 @@ class TestModifyCmdline:
     @pytest.mark.parametrize(
         "cmdline,target,expected",
         [
-            ("root=/dev/mmcblk0p2 rootwait", 3, "root=/dev/mmcblk0p3 rootwait"),
-            ("root=/dev/mmcblk0p3 rootwait", 2, "root=/dev/mmcblk0p2 rootwait"),
-            ("console=tty1 root=mmcblk0p2 quiet", 3, "console=tty1 root=/dev/mmcblk0p3 quiet"),
+            ("root=/dev/mmcblk0p2 rootwait", "/dev/mmcblk0p3", "root=/dev/mmcblk0p3 rootwait"),
+            ("root=/dev/mmcblk0p3 rootwait", "/dev/mmcblk0p2", "root=/dev/mmcblk0p2 rootwait"),
+            ("console=tty1 root=mmcblk0p2 quiet", "/dev/mmcblk0p3", "console=tty1 root=/dev/mmcblk0p3 quiet"),
+            ("root=/dev/nvme0n1p2 rootwait", "/dev/nvme0n1p3", "root=/dev/nvme0n1p3 rootwait"),
+            ("console=tty1 root=/dev/sda3 quiet", "/dev/sda2", "console=tty1 root=/dev/sda2 quiet"),
+            # Only the root= parameter is touched
+            ("root=/dev/sda2 overlayroot=tmpfs", "/dev/sda3", "root=/dev/sda3 overlayroot=tmpfs"),
         ],
     )
     def test_switches_root(self, cmdline, target, expected):
-        assert tryboot.modify_cmdline_partition(cmdline, target) == expected
+        assert tryboot.modify_cmdline_root(cmdline, target) == expected
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG: a root= the regex doesn't recognise (e.g. PARTUUID) is left unchanged, so tryboot "
-        "silently reboots into the same partition instead of failing",
-    )
-    def test_unrecognised_root_is_not_silently_ignored(self, boot_dir, booted_from):
-        (boot_dir / "cmdline.txt").write_text("console=tty1 root=PARTUUID=abcd1234-02 rootwait\n")
+    def test_no_root_is_left_unchanged(self):
+        assert tryboot.modify_cmdline_root("console=tty1 quiet", "/dev/sda3") == "console=tty1 quiet"
+
+    @pytest.mark.parametrize("disk,device", [("/dev/nvme0n1p", "/dev/nvme0n1p3"), ("/dev/sda", "/dev/sda3")])
+    def test_tryline_stays_on_booted_disk(self, boot_dir, booted_from, disk, device):
+        (boot_dir / "cmdline.txt").write_text(f"console=tty1 root={disk}2 rootwait\n")
+        booted_from(2, disk=disk)
+        with patch("subprocess.run"):
+            assert tryboot.execute_tryboot(reboot=False) == 0
+        assert (boot_dir / "tryline.txt").read_text() == f"console=tty1 root={device} rootwait\n"
+
+    def test_missing_root_is_not_silently_ignored(self, boot_dir, booted_from):
+        (boot_dir / "cmdline.txt").write_text("console=tty1 rootwait\n")
         booted_from(2)
         with patch("subprocess.run"):
-            rc = tryboot.execute_tryboot(reboot=False)
-        tryline = (boot_dir / "tryline.txt").read_text() if (boot_dir / "tryline.txt").exists() else None
-        assert rc != 0 or tryline != (boot_dir / "cmdline.txt").read_text()
+            assert tryboot.execute_tryboot(reboot=False) != 0
+        assert not (boot_dir / "tryline.txt").exists()
 
 
 class TestExecuteTryboot:

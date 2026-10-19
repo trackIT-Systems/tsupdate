@@ -79,17 +79,36 @@ class TestPartitionDetection:
         ):
             assert status.get_inactive_partition() == inactive
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG: inactive partition is hardcoded to /dev/mmcblk0p{2,3}; booting from NVMe/USB "
-        "would make syncroot/apply/restore write to the SD card instead",
+    @pytest.mark.parametrize(
+        "booted,inactive",
+        [
+            ("/dev/nvme0n1p2", "/dev/nvme0n1p3"),
+            ("/dev/nvme1n1p3", "/dev/nvme1n1p2"),
+            ("/dev/sda2", "/dev/sda3"),
+            ("/dev/sdb3", "/dev/sdb2"),
+            ("/dev/vda2", "/dev/vda3"),
+            ("/dev/mmcblk1p2", "/dev/mmcblk1p3"),
+        ],
     )
-    def test_inactive_partition_stays_on_booted_disk(self):
-        with patch.object(status, "parse_cmdline", return_value={"root": "/dev/nvme0n1p2"}), patch.object(
+    def test_inactive_partition_stays_on_booted_disk(self, booted, inactive):
+        with patch.object(status, "parse_cmdline", return_value={"root": booted}), patch.object(
             status, "get_partition_label", return_value=None
         ):
-            inactive = status.get_inactive_partition()
-        assert inactive is None or inactive[0].startswith("/dev/nvme0n1")
+            num = int(inactive[-1])
+            assert status.get_inactive_partition() == (inactive, num, ROOT_LABELS[num])
+
+    @pytest.mark.parametrize("root", ["PARTUUID=abcd1234-02", "UUID=1234", "LABEL=rootfs"])
+    def test_unresolved_root_is_unknown(self, root):
+        with patch.object(status, "parse_cmdline", return_value={"root": root}):
+            assert status.get_root_partition_from_cmdline() is None
+            assert status.get_inactive_partition() is None
+
+    @pytest.mark.parametrize("device", ["/dev/nvme0n1", "/dev/sda", "/dev/mmcblk0", "", "/dev/loop0"])
+    def test_sibling_of_a_whole_disk_is_unknown(self, device):
+        assert status.get_sibling_partition_device(device, 3) is None
+
+
+ROOT_LABELS = {2: "rootfs", 3: "clonefs"}
 
 
 class TestStatusFormatting:

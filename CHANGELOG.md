@@ -24,6 +24,7 @@ retroactively on the last commit of their month. Everything newer is unreleased.
 - Pin update sources to the trackIT-Systems GitHub org, with tests for the org pin and cache verification.
 
 ### Fixed
+- Derive the inactive partition (p2 <-> p3) from the booted disk, so NVMe, USB and other drives work and `syncroot`, `apply` and `restore` can no longer target `/dev/mmcblk0` when booted from elsewhere. Tryboot and rollback now fail instead of silently rebooting into the same partition when `cmdline.txt` has no `root=`. `root=PARTUUID=`/`UUID=`/`LABEL=` is not resolved (#3).
 - Extract update archives to `/data/tsupdate/extract` instead of `/tmp`, remove the directory when extraction fails, and reject members that would escape it (`filter="data"`) (#7).
 - Fix the atime assertion in the persist test.
 - Stop re-applying an update that failed to boot (reboot loop).

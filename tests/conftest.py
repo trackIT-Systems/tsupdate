@@ -33,12 +33,12 @@ def boot_dir(tmp_path, monkeypatch) -> Path:
 def booted_from(monkeypatch):
     """Fake which partition is booted and whether it was via tryboot.
 
-    Usage: booted_from(2) / booted_from(3, tryboot=True)
+    Usage: booted_from(2) / booted_from(3, tryboot_active=True) / booted_from(2, disk="/dev/nvme0n1p")
     """
 
-    def _set(partition: int, tryboot_active: bool = False) -> None:
+    def _set(partition: int, tryboot_active: bool = False, disk: str = "/dev/mmcblk0p") -> None:
         label = {2: "rootfs", 3: "clonefs"}.get(partition, "unknown")
-        booted = (f"/dev/mmcblk0p{partition}", partition, label)
+        booted = (f"{disk}{partition}", partition, label)
         monkeypatch.setattr("tsupdate.status.get_booted_partition", lambda: booted)
         monkeypatch.setattr("tsupdate.tryboot.get_booted_partition", lambda: booted)
         monkeypatch.setattr("tsupdate.status.get_partition_label", lambda device: None)
