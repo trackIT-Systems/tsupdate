@@ -424,7 +424,7 @@ def main():
     args = parser.parse_args()
     
     # Configure logging based on verbose flag
-    configure_logging(verbose=args.verbose)
+    configure_logging("tsupdate", verbose=args.verbose)
     
     # Initialize GitHub token once at program start
     initialize_github_token()

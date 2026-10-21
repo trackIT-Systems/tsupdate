@@ -22,6 +22,7 @@ retroactively on the last commit of their month. Everything newer is unreleased.
 - Rewrite the README.
 - Upgrade `actions/checkout` and `actions/setup-python` to v7.
 - Pin update sources to the trackIT-Systems GitHub org, with tests for the org pin and cache verification.
+- Under systemd, log to the journal with the syslog priority, `SYSLOG_IDENTIFIER` `tsupdated` and `CODE_FILE`/`CODE_LINE`/`CODE_FUNC`; previously every line was stored as info.
 
 ### Fixed
 - Derive the inactive partition (p2 <-> p3) from the booted disk, so NVMe, USB and other drives work and `syncroot`, `apply` and `restore` can no longer target `/dev/mmcblk0` when booted from elsewhere. Tryboot and rollback now fail instead of silently rebooting into the same partition when `cmdline.txt` has no `root=`. `root=PARTUUID=`/`UUID=`/`LABEL=` is not resolved (#3).

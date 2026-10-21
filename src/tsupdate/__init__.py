@@ -2,8 +2,8 @@
 
 import logging
 import os
-import sys
 
+from tsupdate.journal import log_handler
 from tsupdate.status import read_booted_os_release
 
 __version__ = "2025.12.1"
@@ -20,11 +20,15 @@ BOOTED_OS_VERSION_COMMIT = _booted_os_release.version_commit if _booted_os_relea
 BOOTED_OS_ID = _booted_os_release.id if _booted_os_release else None
 
 
-def configure_logging(verbose: bool = False) -> None:
+def configure_logging(identifier: str, verbose: bool = False) -> None:
     """
     Configure logging for the tsupdate tool.
     
+    Under systemd, records go to the journal with their syslog priority;
+    otherwise they go to stderr.
+    
     Args:
+        identifier: Program name, used as SYSLOG_IDENTIFIER in the journal
         verbose: If True, set log level to DEBUG. Otherwise, use INFO.
     """
     level = logging.DEBUG if verbose else logging.INFO
@@ -36,11 +40,7 @@ def configure_logging(verbose: bool = False) -> None:
     # Remove existing handlers to avoid duplicates
     root_logger.handlers.clear()
     
-    # Create handler for stderr
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setLevel(level)
-    
-    # Set format based on level
+    # Set the stderr format based on level
     if verbose:
         # More detailed format for DEBUG
         formatter = logging.Formatter(
@@ -51,7 +51,9 @@ def configure_logging(verbose: bool = False) -> None:
         # Simple format for INFO and above
         formatter = logging.Formatter('%(levelname)s: %(message)s')
     
-    handler.setFormatter(formatter)
+    # Journal handler under systemd, stderr handler otherwise
+    handler = log_handler(identifier, formatter)
+    handler.setLevel(level)
     root_logger.addHandler(handler)
 
 
