@@ -20,7 +20,7 @@ BOOTED_OS_VERSION_COMMIT = _booted_os_release.version_commit if _booted_os_relea
 BOOTED_OS_ID = _booted_os_release.id if _booted_os_release else None
 
 
-def configure_logging(identifier: str, verbose: bool = False) -> None:
+def configure_logging(identifier: str, verbose: bool = False, default_level: int = logging.INFO) -> None:
     """
     Configure logging for the tsupdate tool.
     
@@ -29,9 +29,11 @@ def configure_logging(identifier: str, verbose: bool = False) -> None:
     
     Args:
         identifier: Program name, used as SYSLOG_IDENTIFIER in the journal
-        verbose: If True, set log level to DEBUG. Otherwise, use INFO.
+        verbose: If True, set log level to DEBUG. Otherwise, use `default_level`.
+        default_level: Level without `verbose`: INFO for the CLI, whose progress
+            messages are its output; WARNING for the daemon.
     """
-    level = logging.DEBUG if verbose else logging.INFO
+    level = logging.DEBUG if verbose else default_level
     
     # Configure root logger
     root_logger = logging.getLogger()

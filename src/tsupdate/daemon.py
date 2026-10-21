@@ -860,7 +860,7 @@ def run_daemon(config_path: Path, schedule_path: Optional[Path] = None, verbose:
         verbose: Enable debug logging
     """
     # Configure logging
-    configure_logging("tsupdated", verbose=verbose)
+    configure_logging("tsupdated", verbose=verbose, default_level=logging.WARNING)
     
     logger.info("Starting tsupdated - automatic update daemon")
     logger.info(f"Configuration file: {config_path}")
