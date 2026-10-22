@@ -13,7 +13,14 @@ from tsupdate.syncroot import execute_syncroot, execute_mount, execute_unmount
 from tsupdate.apply import execute_apply
 from tsupdate.restore import execute_restore
 from tsupdate.utils import ensure_file, ARTIFACTS_DIR
-from tsupdate.github import parse_github_repo_url, fetch_releases, find_latest_image, find_applicable_batch_update, initialize_github_token
+from tsupdate.errors import UpdateError
+from tsupdate.github import (
+    fetch_releases,
+    find_applicable_batch_update,
+    find_latest_image,
+    initialize_github_token,
+    update_source,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -30,13 +37,12 @@ def execute_download(file_source: str) -> int:
         file_source: URL or local file path to download
     
     Returns:
-        Exit code (0 for success, non-zero for failure)
+        0 (success)
+
+    Raises:
+        UpdateError: The file cannot be downloaded (see ensure_file()).
     """
     file_path, is_local = ensure_file(file_source, ARTIFACTS_DIR)
-    
-    if file_path is None:
-        logger.error("Failed to download file")
-        return 1
     
     if is_local:
         print(f"Using local file: {file_path}")
@@ -61,47 +67,15 @@ def execute_check(include_prereleases: bool = False, max_releases: int = 5, gith
         github_url: Optional GitHub repository URL (overrides SUPPORT_URL from os-release)
     
     Returns:
-        Exit code (0 for success, non-zero for failure)
+        0 (success), also when no image or update was found
+
+    Raises:
+        UpdateError: The update source is missing or invalid, or GitHub cannot be queried.
     """
-    # Read os-release (needed for VERSION_ID, and possibly SUPPORT_URL)
-    os_release = read_booted_os_release()
-    if not os_release:
-        logger.error("Could not read /etc/os-release")
-        return 1
-    
-    # Get GitHub URL - use provided URL or fall back to SUPPORT_URL from os-release
-    if github_url:
-        support_url = github_url
-        logger.debug("Using provided GitHub URL: %s", support_url)
-    else:
-        support_url = os_release.get("SUPPORT_URL")
-        if not support_url:
-            logger.error("SUPPORT_URL not found in /etc/os-release and no GitHub URL provided")
-            return 1
-        logger.debug("Using SUPPORT_URL from os-release: %s", support_url)
-    
-    # Get VERSION_ID from os-release (needed for batch update matching)
-    version_id = os_release.version_id
-    if not version_id:
-        logger.error("VERSION_ID not found in /etc/os-release")
-        return 1
-    
-    logger.debug("VERSION_ID: %s", version_id)
-    
-    # Parse GitHub repo URL
-    repo_info = parse_github_repo_url(support_url)
-    if not repo_info:
-        logger.error("Could not parse GitHub repository URL: %s", support_url)
-        return 1
-    
-    owner, repo = repo_info
-    logger.debug("GitHub repository: %s/%s", owner, repo)
+    owner, repo, version_id = update_source(read_booted_os_release(), github_url)
     
     # Fetch releases (only as many as are searched for a batch update)
     releases = fetch_releases(owner, repo, include_prereleases=include_prereleases, limit=max_releases)
-    if not releases:
-        logger.error("Could not fetch releases from GitHub")
-        return 1
     
     # Find latest image
     image_url = find_latest_image(releases)
@@ -443,76 +417,83 @@ def main():
             print("ERROR: This command requires root privileges. Please run as root or use sudo.", file=sys.stderr)
             sys.exit(1)
     
-    # Handle status command
-    if args.command == "status":
-        status = get_system_status()
-        if args.json:
-            print(format_status_json(status))
-        else:
-            print(format_status_text(status))
-        sys.exit(0)
+    # A failed command raises UpdateError: report its message (no traceback, it is expected)
+    # and exit with its exit code, 1, 75 (transient) or 78 (configuration). Other exceptions
+    # are bugs and keep their traceback.
+    try:
+        # Handle status command
+        if args.command == "status":
+            status = get_system_status()
+            if args.json:
+                print(format_status_json(status))
+            else:
+                print(format_status_text(status))
+            sys.exit(0)
     
-    # Handle tryboot command
-    if args.command == "tryboot":
-        exit_code = execute_tryboot(reboot=not args.no_reboot)
-        sys.exit(exit_code)
+        # Handle tryboot command
+        if args.command == "tryboot":
+            exit_code = execute_tryboot(reboot=not args.no_reboot)
+            sys.exit(exit_code)
     
-    # Handle persist command
-    if args.command == "persist":
-        exit_code = execute_persist(reboot=args.reboot)
-        sys.exit(exit_code)
+        # Handle persist command
+        if args.command == "persist":
+            exit_code = execute_persist(reboot=args.reboot)
+            sys.exit(exit_code)
     
-    # Handle rollback command
-    if args.command == "rollback":
-        exit_code = rollback_tryboot(reboot=not args.no_reboot)
-        sys.exit(exit_code)
+        # Handle rollback command
+        if args.command == "rollback":
+            exit_code = rollback_tryboot(reboot=not args.no_reboot)
+            sys.exit(exit_code)
     
-    # Handle syncroot command
-    if args.command == "syncroot":
-        exit_code = execute_syncroot(rsync_timeout_sec=args.rsync_timeout)
-        sys.exit(exit_code)
+        # Handle syncroot command
+        if args.command == "syncroot":
+            exit_code = execute_syncroot(rsync_timeout_sec=args.rsync_timeout)
+            sys.exit(exit_code)
     
-    # Handle mount command
-    if args.command == "mount":
-        exit_code = execute_mount()
-        sys.exit(exit_code)
+        # Handle mount command
+        if args.command == "mount":
+            exit_code = execute_mount()
+            sys.exit(exit_code)
     
-    # Handle unmount command
-    if args.command == "unmount":
-        exit_code = execute_unmount()
-        sys.exit(exit_code)
+        # Handle unmount command
+        if args.command == "unmount":
+            exit_code = execute_unmount()
+            sys.exit(exit_code)
     
-    # Handle apply command
-    if args.command == "apply":
-        exit_code = execute_apply(
-            args.update_file,
-            keep_download=args.keep_download,
-            rsync_timeout_sec=args.rsync_timeout,
-        )
-        sys.exit(exit_code)
+        # Handle apply command
+        if args.command == "apply":
+            exit_code = execute_apply(
+                args.update_file,
+                keep_download=args.keep_download,
+                rsync_timeout_sec=args.rsync_timeout,
+            )
+            sys.exit(exit_code)
     
-    # Handle restore command
-    if args.command == "restore":
-        exit_code = execute_restore(
-            image_source=args.image_source,
-            partition=args.partition,
-            keep_image=args.keep_image,
-        )
-        sys.exit(exit_code)
+        # Handle restore command
+        if args.command == "restore":
+            exit_code = execute_restore(
+                image_source=args.image_source,
+                partition=args.partition,
+                keep_image=args.keep_image,
+            )
+            sys.exit(exit_code)
     
-    # Handle download command
-    if args.command == "download":
-        exit_code = execute_download(args.file_source)
-        sys.exit(exit_code)
+        # Handle download command
+        if args.command == "download":
+            exit_code = execute_download(args.file_source)
+            sys.exit(exit_code)
     
-    # Handle check command
-    if args.command == "check":
-        exit_code = execute_check(
-            include_prereleases=args.pre,
-            max_releases=args.max_releases,
-            github_url=args.github_url
-        )
-        sys.exit(exit_code)
+        # Handle check command
+        if args.command == "check":
+            exit_code = execute_check(
+                include_prereleases=args.pre,
+                max_releases=args.max_releases,
+                github_url=args.github_url
+            )
+            sys.exit(exit_code)
+    except UpdateError as e:
+        logger.error("%s", e)
+        sys.exit(e.exit_code)
     
     # This should not be reached if argparse is working correctly
     parser.print_help()

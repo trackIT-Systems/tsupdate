@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from tsupdate import cli, schedule
+from tsupdate.errors import ConfigurationError, TransientError, UpdateError
 
 
 class TestSchedule:
@@ -53,8 +54,18 @@ class TestSchedule:
     )
     def test_bad_entries_are_rejected(self, entry):
         """An unparseable start/stop (a typo) must not silently become midnight, i.e. a ~22h window."""
-        assert schedule.is_in_maintenance_window(entry) is False
-        assert schedule.get_next_maintenance_window_start(entry) is None
+        with pytest.raises(ConfigurationError):
+            schedule.is_in_maintenance_window(entry)
+        with pytest.raises(ConfigurationError):
+            schedule.get_next_maintenance_window_start(entry)
+
+    def test_missing_scheduleparse(self, monkeypatch):
+        monkeypatch.setattr(schedule, "ScheduleEntry", None)
+        entry = {"start": "02:00", "stop": "02:30"}
+        with pytest.raises(ConfigurationError, match="scheduleparse library is not available"):
+            schedule.is_in_maintenance_window(entry)
+        with pytest.raises(ConfigurationError, match="scheduleparse library is not available"):
+            schedule.get_next_maintenance_window_start(entry)
 
     def test_valid_entry_has_next_start(self):
         assert schedule.get_next_maintenance_window_start({"start": "02:00", "stop": "02:30"}) is not None
@@ -113,5 +124,51 @@ class TestCli:
         monkeypatch.setattr(cli, "read_booted_os_release", lambda: OSRelease(
             {"VERSION_ID": "2025.12.3", "SUPPORT_URL": "https://github.com/trackIT-Systems/tsOS-base"}))
         with patch.object(cli, "fetch_releases", return_value=[]) as fetch:
-            assert cli.execute_check(max_releases=7) == 1
+            assert cli.execute_check(max_releases=7) == 0  # no releases: nothing found, not an error
         fetch.assert_called_once_with("trackIT-Systems", "tsOS-base", include_prereleases=False, limit=7)
+
+    @pytest.mark.parametrize(
+        "error,code",
+        [
+            (TransientError("Cannot reach GitHub: Failed to resolve 'api.github.com'"), 75),
+            (ConfigurationError("Repository not found: trackIT-Systems/nope"), 78),
+            (UpdateError("GitHub API error 422: Validation Failed"), 1),
+        ],
+    )
+    def test_check_reports_the_error_and_its_exit_code(self, monkeypatch, capsys, error, code):
+        from tsupdate.status import OSRelease
+
+        monkeypatch.setattr(cli, "read_booted_os_release", lambda: OSRelease(
+            {"VERSION_ID": "2025.12.3", "SUPPORT_URL": "https://github.com/trackIT-Systems/tsOS-base"}))
+        with patch.object(cli, "fetch_releases", side_effect=error):
+            assert run_cli(monkeypatch, "check") == code
+        captured = capsys.readouterr()
+        assert str(error) in captured.err
+        assert "Traceback" not in captured.err
+        assert "Not found" not in captured.out  # no "no update"-like output for a failure
+
+    def test_check_with_disallowed_url_is_a_configuration_error(self, monkeypatch, capsys):
+        from tsupdate.status import OSRelease
+
+        monkeypatch.setattr(cli, "read_booted_os_release", lambda: OSRelease({"VERSION_ID": "2025.12.3"}))
+        with patch.object(cli, "fetch_releases") as fetch:
+            assert run_cli(monkeypatch, "check", "--github-url", "https://github.com/evil/x") == 78
+        fetch.assert_not_called()
+        assert "Not an allowed update source: https://github.com/evil/x" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "argv,target",
+        [(["apply", "u.tar"], "execute_apply"), (["syncroot"], "execute_syncroot"), (["tryboot"], "execute_tryboot"),
+         (["download", "u.tar"], "execute_download")],
+    )
+    def test_commands_exit_with_the_error_exit_code(self, monkeypatch, capsys, argv, target):
+        monkeypatch.setattr(cli, "is_root", lambda: True)
+        with patch.object(cli, target, side_effect=UpdateError("Rsync failed with exit code 23: x", exit_code=23)):
+            assert run_cli(monkeypatch, *argv) == 23
+        assert "ERROR: Rsync failed with exit code 23: x" in capsys.readouterr().err
+
+    def test_unexpected_errors_are_not_swallowed(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["tsupdate", "check"])
+        monkeypatch.setattr(cli, "initialize_github_token", lambda: None)
+        with patch.object(cli, "execute_check", side_effect=KeyError("bug")), pytest.raises(KeyError):
+            cli.main()

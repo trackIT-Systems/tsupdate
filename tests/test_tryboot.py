@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from tsupdate import tryboot
+from tsupdate.errors import UpdateError
 
 
 class TestModifyCmdline:
@@ -38,8 +39,8 @@ class TestModifyCmdline:
     def test_missing_root_is_not_silently_ignored(self, boot_dir, booted_from):
         (boot_dir / "cmdline.txt").write_text("console=tty1 rootwait\n")
         booted_from(2)
-        with patch("subprocess.run"):
-            assert tryboot.execute_tryboot(reboot=False) != 0
+        with patch("subprocess.run"), pytest.raises(UpdateError, match="No root= parameter"):
+            tryboot.execute_tryboot(reboot=False)
         assert not (boot_dir / "tryline.txt").exists()
 
 
@@ -67,8 +68,8 @@ class TestExecuteTryboot:
     def test_refuses_when_trybooted_and_not_persisted(self, boot_dir, booted_from):
         booted_from(3, tryboot_active=True)
         (boot_dir / "tryline.txt").write_text("root=/dev/mmcblk0p3\n")
-        with patch("subprocess.run") as run:
-            assert tryboot.execute_tryboot(reboot=True) == 1
+        with patch("subprocess.run") as run, pytest.raises(UpdateError, match="already booted via tryboot"):
+            tryboot.execute_tryboot(reboot=True)
         run.assert_not_called()
 
     def test_allowed_when_trybooted_and_persisted(self, boot_dir, booted_from):
@@ -80,12 +81,20 @@ class TestExecuteTryboot:
     def test_fails_without_config_txt(self, boot_dir, booted_from):
         booted_from(2)
         (boot_dir / "config.txt").unlink()
-        assert tryboot.execute_tryboot(reboot=False) == 1
+        with pytest.raises(UpdateError, match="config.txt does not exist"):
+            tryboot.execute_tryboot(reboot=False)
+
+    def test_failed_reboot_is_raised(self, boot_dir, booted_from):
+        booted_from(2)
+        with patch("subprocess.run", side_effect=FileNotFoundError("reboot")), pytest.raises(
+            UpdateError, match='please reboot manually using reboot "0 tryboot"'
+        ):
+            tryboot.execute_tryboot(reboot=True)
 
     def test_add_cmdline_entry_is_idempotent(self, boot_dir):
         (boot_dir / "tryboot.txt").write_text("arm_64bit=1")  # no trailing newline
-        assert tryboot.add_cmdline_entry()
-        assert tryboot.add_cmdline_entry()
+        tryboot.add_cmdline_entry()
+        tryboot.add_cmdline_entry()
         assert (boot_dir / "tryboot.txt").read_text() == "arm_64bit=1\ncmdline=tryline.txt\n"
 
 
@@ -102,7 +111,7 @@ class TestPersist:
         os.utime(cmdline, (1_000_000_000, 1_000_000_000))
         (boot_dir / "tryline.txt").write_text("root=/dev/mmcblk0p3 rootwait\n")
 
-        assert tryboot.persist_boot_configuration()
+        tryboot.persist_boot_configuration()
         # stat before reading: with relatime, reading the file would bump atime itself
         st = cmdline.stat()
         assert st.st_mtime == 1_000_000_000
@@ -112,13 +121,15 @@ class TestPersist:
 
     def test_persist_without_tryline_fails_and_keeps_cmdline(self, boot_dir):
         before = (boot_dir / "cmdline.txt").read_text()
-        assert not tryboot.persist_boot_configuration()
+        with pytest.raises(UpdateError, match="tryline.txt does not exist"):
+            tryboot.persist_boot_configuration()
         assert (boot_dir / "cmdline.txt").read_text() == before
 
     def test_execute_persist_requires_tryboot(self, boot_dir, booted_from):
         booted_from(2, tryboot_active=False)
         (boot_dir / "tryline.txt").write_text("root=/dev/mmcblk0p3\n")
-        assert tryboot.execute_persist() == 1
+        with pytest.raises(UpdateError, match="not booted via tryboot"):
+            tryboot.execute_persist()
         assert "mmcblk0p2" in (boot_dir / "cmdline.txt").read_text()
 
     def test_execute_persist_in_tryboot(self, boot_dir, booted_from):
@@ -148,7 +159,8 @@ class TestRollback:
 
     def test_rollback_requires_tryboot(self, boot_dir, booted_from):
         booted_from(2, tryboot_active=False)
-        assert tryboot.rollback_tryboot(reboot=False) == 1
+        with pytest.raises(UpdateError, match="not booted via tryboot"):
+            tryboot.rollback_tryboot(reboot=False)
 
 
 class TestWriteFileAtomic:
@@ -204,13 +216,13 @@ class TestBootFileWritesAreAtomic:
     def test_persist_failure_keeps_cmdline(self, boot_dir):
         before = (boot_dir / "cmdline.txt").read_text()
         (boot_dir / "tryline.txt").write_text("root=/dev/mmcblk0p3\n")
-        with patch("os.replace", side_effect=OSError("power cut")):
-            assert not tryboot.persist_boot_configuration()
+        with patch("os.replace", side_effect=OSError("power cut")), pytest.raises(UpdateError, match="power cut"):
+            tryboot.persist_boot_configuration()
         assert (boot_dir / "cmdline.txt").read_text() == before
 
     def test_rollback_failure_keeps_cmdline(self, boot_dir, booted_from):
         booted_from(3, tryboot_active=True)
         (boot_dir / "cmdline.txt").write_text("root=/dev/mmcblk0p3\n")
-        with patch("os.replace", side_effect=OSError("power cut")):
-            assert tryboot.rollback_tryboot(reboot=False) == 1
+        with patch("os.replace", side_effect=OSError("power cut")), pytest.raises(UpdateError, match="power cut"):
+            tryboot.rollback_tryboot(reboot=False)
         assert (boot_dir / "cmdline.txt").read_text() == "root=/dev/mmcblk0p3\n"

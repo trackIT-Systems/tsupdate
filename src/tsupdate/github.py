@@ -8,7 +8,9 @@ import subprocess
 from typing import List, Optional, Tuple
 
 from github import Github
-from github.GithubException import GithubException
+from github.GithubException import GithubException, RateLimitExceededException
+
+from tsupdate.errors import NETWORK_ERRORS, ConfigurationError, TransientError, UpdateError, network_error
 
 logger = logging.getLogger(__name__)
 
@@ -108,14 +110,14 @@ def parse_github_repo_url(support_url: str) -> Optional[Tuple[str, str]]:
     match = re.fullmatch(pattern, support_url.strip())
 
     if not match:
-        logger.warning("Could not parse GitHub repo URL from: %s", support_url)
+        logger.debug("Could not parse GitHub repo URL from: %s", support_url)
         return None
 
     owner = match.group(1)
     repo = match.group(2)
 
     if owner.lower() != ALLOWED_OWNER.lower():
-        logger.warning(
+        logger.debug(
             "Rejecting update source from disallowed owner '%s' (only '%s' is accepted): %s",
             owner,
             ALLOWED_OWNER,
@@ -127,12 +129,56 @@ def parse_github_repo_url(support_url: str) -> Optional[Tuple[str, str]]:
     return (owner, repo)
 
 
+def update_source(os_release, github_url: str | None = None) -> tuple[str, str, str]:
+    """
+    The repository to look for updates in, and the version to update from.
+
+    Args:
+        os_release: OSRelease of the booted system (or None if it could not be read)
+        github_url: Repository URL that overrides SUPPORT_URL from os-release
+
+    Returns:
+        (owner, repo, version_id)
+
+    Raises:
+        UpdateError: /etc/os-release cannot be read.
+        ConfigurationError: There is no repository URL, it is not an allowed GitHub URL, or
+            VERSION_ID is missing.
+    """
+    if not os_release:
+        raise UpdateError("Could not read /etc/os-release")
+
+    if github_url:
+        support_url = github_url
+        logger.debug("Using GitHub URL from configuration: %s", support_url)
+    else:
+        support_url = os_release.get("SUPPORT_URL")
+        if not support_url:
+            raise ConfigurationError("SUPPORT_URL not found in /etc/os-release and no github_url configured")
+        logger.debug("Using SUPPORT_URL from os-release: %s", support_url)
+
+    version_id = os_release.version_id
+    if not version_id:
+        raise ConfigurationError("VERSION_ID not found in /etc/os-release")
+    logger.debug("Current VERSION_ID: %s", version_id)
+
+    repo_info = parse_github_repo_url(support_url)
+    if not repo_info:
+        raise ConfigurationError(
+            f"Not an allowed update source: {support_url}; expected https://github.com/{ALLOWED_OWNER}/<repo>"
+        )
+    owner, repo = repo_info
+    logger.debug("GitHub repository: %s/%s", owner, repo)
+    return owner, repo, version_id
+
+
 def _create_github_client():
     """
     Create and configure a GitHub client instance.
     
-    Uses module-level GitHub token if available. Validates token by checking rate limit.
-    Retries are disabled to prevent blocking signal handling when rate limited.
+    Uses module-level GitHub token if available. Retries are disabled to prevent blocking
+    signal handling when rate limited. An invalid token is reported by the first request
+    (401, a ConfigurationError), so the token is not verified separately.
     
     Returns:
         Configured Github instance
@@ -143,61 +189,90 @@ def _create_github_client():
     if github_token:
         g = Github(github_token, retry=0)
         logger.debug("Using GitHub token for authentication")
-        # Verify token is valid by checking rate limit
-        try:
-            rate_limit = g.get_rate_limit()
-            if hasattr(rate_limit, 'resources') and hasattr(rate_limit.resources, 'core'):
-                logger.debug(
-                    "Rate limit remaining: %s/%s",
-                    rate_limit.resources.core.remaining,
-                    rate_limit.resources.core.limit,
-                )
-            elif hasattr(rate_limit, 'rate'):
-                logger.debug("Rate limit remaining: %s/%s", rate_limit.rate.remaining, rate_limit.rate.limit)
-            else:
-                logger.debug("Rate limit checked (structure unknown)")
-        except Exception as e:
-            logger.warning("Could not verify GitHub token: %s", e)
+        if logger.isEnabledFor(logging.DEBUG):
+            _log_rate_limit(g)
     else:
         g = Github(retry=0)
         logger.debug("Using unauthenticated GitHub API access")
     return g
 
 
-def _handle_github_exception(e: GithubException, owner: str, repo: str) -> None:
+def _log_rate_limit(g) -> None:
+    """Log the remaining API rate limit at DEBUG. Costs one request, so only done when debugging."""
+    try:
+        rate_limit = g.get_rate_limit()
+        if hasattr(rate_limit, 'resources') and hasattr(rate_limit.resources, 'core'):
+            logger.debug(
+                "Rate limit remaining: %s/%s",
+                rate_limit.resources.core.remaining,
+                rate_limit.resources.core.limit,
+            )
+        elif hasattr(rate_limit, 'rate'):
+            logger.debug("Rate limit remaining: %s/%s", rate_limit.rate.remaining, rate_limit.rate.limit)
+        else:
+            logger.debug("Rate limit checked (structure unknown)")
+    except Exception as e:  # noqa: BLE001 - only a debugging aid; the real request reports errors
+        logger.debug("Could not read the GitHub rate limit: %s", e)
+
+
+def _is_rate_limit(e: GithubException) -> bool:
+    """Whether a 403/429 from GitHub is the rate limit rather than missing permissions."""
+    if isinstance(e, RateLimitExceededException) or e.status == 429:
+        return True
+    headers = {k.lower(): v for k, v in (e.headers or {}).items()}
+    if headers.get("x-ratelimit-remaining") == "0":
+        return True
+    message = e.data.get("message", "") if isinstance(e.data, dict) else str(e.data or "")
+    return "rate limit" in message.lower()
+
+
+def github_error(e: Exception, owner: str, repo: str) -> UpdateError:
     """
-    Handle and log GitHub API exceptions consistently.
-    
+    Map an error from a GitHub API request to an UpdateError.
+
+    Rate limit, 5xx and network errors are transient; 401, 403 and 404 need a human.
+    Anything else is returned unchanged by the caller (an unexpected error).
+
     Args:
-        e: GithubException to handle
+        e: GithubException or network error raised by PyGithub
         owner: Repository owner
         repo: Repository name
     """
+    if not isinstance(e, GithubException):
+        return network_error(e, "GitHub")
+
+    token = get_github_token()
     if e.status == 404:
-        if get_github_token():
-            logger.error(
-                "Repository not found or access denied: %s/%s; if it is a private repository, "
-                "ensure your token has 'repo' scope permissions",
-                owner,
-                repo,
+        if token:
+            return ConfigurationError(
+                f"Repository not found or access denied: {owner}/{repo}; if it is a private repository, "
+                "ensure your token has 'repo' scope permissions"
             )
-        else:
-            logger.error(
-                "Repository not found: %s/%s; if it is a private repository, "
-                "set the GH_TOKEN environment variable to a token that has 'repo' scope",
-                owner,
-                repo,
-            )
-    elif e.status == 403:
-        if get_github_token():
-            logger.error(
-                "GitHub API rate limit exceeded or access forbidden; check that your token has the necessary "
+        return ConfigurationError(
+            f"Repository not found: {owner}/{repo}; if it is a private repository, "
+            "set the GH_TOKEN environment variable to a token that has 'repo' scope"
+        )
+    if e.status in (403, 429) and _is_rate_limit(e):
+        hint = "" if token else "; set GH_TOKEN for a higher limit"
+        return TransientError(f"GitHub API rate limit exceeded{hint}")
+    if e.status == 401:
+        return ConfigurationError("GitHub rejected the token (401 Bad credentials); check GH_TOKEN or 'gh auth token'")
+    if e.status == 403:
+        if token:
+            return ConfigurationError(
+                f"GitHub denied access to {owner}/{repo}; check that your token has the necessary "
                 "permissions (e.g., 'repo' scope for private repos)"
             )
-        else:
-            logger.error("GitHub API rate limit exceeded or access forbidden")
-    else:
-        logger.error("GitHub API error: %s %s", e.status, e.data)
+        return ConfigurationError(f"GitHub denied access to {owner}/{repo}")
+    if isinstance(e.status, int) and e.status >= 500:
+        return TransientError(f"GitHub API error {e.status}: {_github_message(e)}")
+    return UpdateError(f"GitHub API error {e.status}: {_github_message(e)}")
+
+
+def _github_message(e: GithubException) -> str:
+    if isinstance(e.data, dict) and e.data.get("message"):
+        return str(e.data["message"])
+    return str(e.data) if e.data else "no message"
 
 
 def _get_assets_from_release(release) -> List[dict]:
@@ -284,7 +359,7 @@ def parse_github_release_url(url: str) -> Optional[Tuple[str, str, Optional[str]
     if match:
         owner, repo, tag, asset_name = match.groups()
         if owner.lower() != ALLOWED_OWNER.lower():
-            logger.warning(
+            logger.debug(
                 "Rejecting release URL from disallowed owner '%s' (only '%s' is accepted): %s",
                 owner,
                 ALLOWED_OWNER,
@@ -300,7 +375,7 @@ def parse_github_release_url(url: str) -> Optional[Tuple[str, str, Optional[str]
     if match:
         owner, repo, tag = match.groups()
         if owner.lower() != ALLOWED_OWNER.lower():
-            logger.warning(
+            logger.debug(
                 "Rejecting release URL from disallowed owner '%s' (only '%s' is accepted): %s",
                 owner,
                 ALLOWED_OWNER,
@@ -314,7 +389,7 @@ def parse_github_release_url(url: str) -> Optional[Tuple[str, str, Optional[str]
     return None
 
 
-def resolve_github_release_asset(url: str) -> Optional[dict]:
+def resolve_github_release_asset(url: str) -> dict:
     """
     Resolve a GitHub release URL to the actual asset, via the GitHub API.
 
@@ -323,86 +398,70 @@ def resolve_github_release_asset(url: str) -> Optional[dict]:
     repositories (reads GH_TOKEN from environment variable).
 
     Args:
-        url: GitHub release URL (download or tag URL)
+        url: GitHub release URL (download URL with tag and asset name)
 
     Returns:
-        {"url": <download url>, "size": <int or None>, "digest": <str or None>}
-        or None on error. `size`/`digest` come from the GitHub API's asset
-        metadata (whichever of those fields the API response for this asset
-        happened to include) and are used by ensure_file() to verify a
-        cached/resumed file before reusing it without re-downloading.
+        {"url": <download url>, "size": <int or None>, "digest": <str or None>}.
+        `size`/`digest` come from the GitHub API's asset metadata (whichever of
+        those fields the API response for this asset happened to include) and
+        are used by ensure_file() to verify a cached/resumed file before reusing
+        it without re-downloading.
+
+    Raises:
+        ConfigurationError: The URL is not a release download URL of ALLOWED_OWNER, or the
+            repository, release or asset does not exist.
+        TransientError: GitHub is unreachable or rate limited.
+        UpdateError: Any other GitHub API error.
     """
-    # Parse the URL
     parsed = parse_github_release_url(url)
     if not parsed:
-        logger.error("Invalid GitHub release URL format: %s", url)
-        return None
+        raise ConfigurationError(
+            f"Invalid GitHub release URL: {url}; expected https://github.com/{ALLOWED_OWNER}/<repo>/releases/"
+            "download/<tag>/<asset>"
+        )
 
     owner, repo, tag, asset_name = parsed
 
-    # If URL already contains asset name, we can construct the download URL directly
-    # But we still need to verify it exists and get authenticated URL if needed
-    if tag and asset_name:
-        # We have both tag and asset name, but we should verify via API
-        # and get authenticated URL for private repos
+    if not asset_name:
+        raise ConfigurationError(
+            f"Cannot resolve GitHub release URL {url}: asset name required; "
+            "use https://github.com/owner/repo/releases/download/tag/asset-name"
+        )
+
+    # Verify the asset via the API and get an authenticated URL for private repos
+    try:
+        g = _create_github_client()
+        repository = g.get_repo(f"{owner}/{repo}")
         try:
-            # Create GitHub client
-            g = _create_github_client()
-            repository = g.get_repo(f"{owner}/{repo}")
-
-            # Get release by tag
-            try:
-                release = repository.get_release(tag)
-            except GithubException as e:
-                if e.status == 404:
-                    logger.error("Release tag '%s' not found in %s/%s", tag, owner, repo)
-                else:
-                    logger.error("Error fetching release: %s %s", e.status, e.data)
-                return None
-
-            # Find the asset by name
-            assets = _get_assets_from_release(release)
-            for asset_info in assets:
-                if asset_info['name'] == asset_name:
-                    metadata = {"size": asset_info.get("size"), "digest": asset_info.get("digest")}
-                    # Prefer browser_download_url (works for public repos, simpler)
-                    # Only use API endpoint if we have a token (for private repos)
-                    github_token = get_github_token()
-                    if github_token and 'id' in asset_info:
-                        # For private repos with auth, use API endpoint
-                        api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_info['id']}"
-                        logger.debug("Found asset: %s -> API endpoint (authenticated): %s", asset_name, api_url)
-                        return {"url": api_url, **metadata}
-                    else:
-                        # For public repos or when no token, use browser_download_url
-                        browser_url = asset_info.get('url', '')
-                        if browser_url:
-                            logger.debug("Found asset: %s -> browser_download_url: %s", asset_name, browser_url)
-                            return {"url": browser_url, **metadata}
-                        elif 'id' in asset_info:
-                            # Fallback to API endpoint if browser_url not available
-                            api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_info['id']}"
-                            logger.debug("Found asset: %s -> API endpoint (fallback): %s", asset_name, api_url)
-                            return {"url": api_url, **metadata}
-
-            logger.error("Asset '%s' not found in release '%s'", asset_name, tag)
-            return None
-
+            release = repository.get_release(tag)
         except GithubException as e:
-            _handle_github_exception(e, owner, repo)
-            return None
-        except Exception as e:
-            logger.error("Unexpected error resolving GitHub release URL: %s", e)
-            return None
+            if e.status == 404:
+                raise ConfigurationError(f"Release tag '{tag}' not found in {owner}/{repo}") from e
+            raise
+        assets = _get_assets_from_release(release)
+    except (GithubException, *NETWORK_ERRORS) as e:
+        raise github_error(e, owner, repo) from e
 
-    # If we only have tag (no asset name), we need to find the asset
-    # This is less common but we'll handle it
-    if tag and not asset_name:
-        logger.error("Cannot resolve GitHub release URL: asset name required")
-        logger.error("Use format: https://github.com/owner/repo/releases/download/tag/asset-name")
-        return None
+    for asset_info in assets:
+        if asset_info['name'] != asset_name:
+            continue
+        metadata = {"size": asset_info.get("size"), "digest": asset_info.get("digest")}
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_info.get('id')}"
+        # Prefer browser_download_url (works for public repos, simpler)
+        # Only use API endpoint if we have a token (for private repos)
+        if get_github_token() and 'id' in asset_info:
+            logger.debug("Found asset: %s -> API endpoint (authenticated): %s", asset_name, api_url)
+            return {"url": api_url, **metadata}
+        browser_url = asset_info.get('url', '')
+        if browser_url:
+            logger.debug("Found asset: %s -> browser_download_url: %s", asset_name, browser_url)
+            return {"url": browser_url, **metadata}
+        if 'id' in asset_info:
+            # Fallback to API endpoint if browser_url not available
+            logger.debug("Found asset: %s -> API endpoint (fallback): %s", asset_name, api_url)
+            return {"url": api_url, **metadata}
 
-    return None
+    raise ConfigurationError(f"Asset '{asset_name}' not found in release '{tag}' of {owner}/{repo}")
 
 
 def fetch_releases(
@@ -410,7 +469,7 @@ def fetch_releases(
     repo: str,
     include_prereleases: bool = False,
     limit: Optional[int] = None,
-) -> Optional[List]:
+) -> List:
     """
     Fetch GitHub releases using PyGithub.
     
@@ -425,10 +484,14 @@ def fetch_releases(
             instead of every release the repository ever had. None returns all releases.
         
     Returns:
-        List of Release objects from PyGithub, or None on error
+        List of Release objects from PyGithub; empty if the repository has no (matching) releases
+
+    Raises:
+        TransientError: GitHub is unreachable, returned 5xx or is rate limited.
+        ConfigurationError: The repository does not exist or access was denied.
+        UpdateError: Any other GitHub API error.
     """
     try:
-        # Create GitHub client
         g = _create_github_client()
         logger.debug("Fetching releases from: %s/%s", owner, repo)
         repository = g.get_repo(f"{owner}/{repo}")
@@ -439,17 +502,12 @@ def fetch_releases(
         if not include_prereleases:
             candidates = (r for r in candidates if not r.prerelease)
         releases = list(itertools.islice(candidates, limit))
-        
-        kind = "releases" if include_prereleases else "regular releases (excluding pre-releases)"
-        logger.debug("Fetched %s %s%s", len(releases), kind, f" (limit {limit})" if limit is not None else "")
-        return releases
-                
-    except GithubException as e:
-        _handle_github_exception(e, owner, repo)
-        return None
-    except Exception as e:
-        logger.error("Unexpected error fetching releases: %s", e)
-        return None
+    except (GithubException, *NETWORK_ERRORS) as e:
+        raise github_error(e, owner, repo) from e
+
+    kind = "releases" if include_prereleases else "regular releases (excluding pre-releases)"
+    logger.debug("Fetched %s %s%s", len(releases), kind, f" (limit {limit})" if limit is not None else "")
+    return releases
 
 
 def find_latest_image(releases: List) -> Optional[str]:
@@ -525,7 +583,7 @@ def find_applicable_batch_update(releases: List, current_version: str, max_relea
         return None
     
     if not current_version:
-        logger.warning("No current version provided")
+        logger.debug("No current version provided")
         return None
     
     # Escape dots in version for regex

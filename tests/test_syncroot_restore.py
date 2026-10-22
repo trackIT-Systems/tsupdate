@@ -9,56 +9,71 @@ from unittest.mock import patch
 import pytest
 
 from tsupdate import restore, syncroot
+from tsupdate.errors import UpdateError
 
 
 class TestSyncRootPartitions:
     def test_rsync_command(self, tmp_path):
         with patch("subprocess.run") as run:
-            assert syncroot.sync_root_partitions(tmp_path / "src", tmp_path / "dst", rsync_timeout_sec=0)
+            syncroot.sync_root_partitions(tmp_path / "src", tmp_path / "dst", rsync_timeout_sec=0)
         cmd = run.call_args.args[0]
         assert cmd[:6] == ["rsync", "-a", "-h", "--stats", "--delete", "--checksum"]
         assert cmd[-2:] == [f"{tmp_path / 'src'}/", f"{tmp_path / 'dst'}/"]
         assert run.call_args.kwargs["timeout"] is None
 
     @pytest.mark.parametrize(
-        "exc",
-        [subprocess.TimeoutExpired("rsync", 1), subprocess.CalledProcessError(23, "rsync"), FileNotFoundError()],
+        "exc,cls,message",
+        [
+            (subprocess.TimeoutExpired("rsync", 1), UpdateError, r"Rsync timed out \(limit was 1s\)"),
+            (subprocess.CalledProcessError(23, "rsync"), UpdateError, "Rsync failed: .* exit status 23"),
+            (FileNotFoundError(), UpdateError, "Command not found: rsync"),
+        ],
     )
-    def test_failures_return_false(self, tmp_path, exc):
-        with patch("subprocess.run", side_effect=exc):
-            assert not syncroot.sync_root_partitions(tmp_path, tmp_path)
+    def test_failures_raise(self, tmp_path, exc, cls, message):
+        with patch("subprocess.run", side_effect=exc), pytest.raises(UpdateError, match=message) as raised:
+            syncroot.sync_root_partitions(tmp_path, tmp_path)
+        assert type(raised.value) is cls
 
 
 class TestMountContext:
     def test_unmounts_even_on_error(self, tmp_path):
-        with patch.object(syncroot, "mount_partition", return_value=True), patch.object(
-            syncroot, "unmount_partition", return_value=True
-        ) as umount:
+        with patch.object(syncroot, "mount_partition"), patch.object(syncroot, "unmount_partition") as umount:
             with pytest.raises(ValueError):
                 with syncroot.mount_context("/dev/x", tmp_path):
                     raise ValueError("boom")
         umount.assert_called_once_with(tmp_path)
 
     def test_mount_failure_raises(self, tmp_path):
-        with patch.object(syncroot, "mount_partition", return_value=False), pytest.raises(RuntimeError):
-            with syncroot.mount_context("/dev/x", tmp_path):
-                pass
+        failed = subprocess.CalledProcessError(32, "mount", stderr="mount: wrong fs type\n")
+        with (
+            patch("subprocess.run", side_effect=failed), pytest.raises(UpdateError, match="Could not mount /dev/x to .*: mount: wrong fs type$"),
+            syncroot.mount_context("/dev/x", tmp_path),
+        ):
+            pytest.fail("must not be entered")
+
+    def test_unmount_failure_is_only_a_warning(self, tmp_path, caplog):
+        with (
+            patch.object(syncroot, "mount_partition"), patch.object(syncroot, "unmount_partition", side_effect=UpdateError("Could not unmount x: busy")),
+            syncroot.mount_context("/dev/x", tmp_path),
+        ):
+            pass
+        assert [r.levelname for r in caplog.records] == ["WARNING"]
 
 
 class TestExecuteSyncroot:
     def test_refuses_in_unpersisted_tryboot(self, boot_dir, booted_from):
         booted_from(3, tryboot_active=True)
         (boot_dir / "tryline.txt").write_text("root=/dev/mmcblk0p3\n")
-        with patch.object(syncroot, "mount_partition") as mount:
-            assert syncroot.execute_syncroot() == 1
+        with patch.object(syncroot, "mount_partition") as mount, pytest.raises(UpdateError, match="booted regularly"):
+            syncroot.execute_syncroot()
         mount.assert_not_called()
 
     def test_syncs_to_inactive_partition(self, boot_dir, booted_from, tmp_path, monkeypatch):
         booted_from(2)
         monkeypatch.setattr(syncroot, "ROOT_UP", tmp_path / "root-up")
-        with patch.object(syncroot, "mount_partition", return_value=True) as mount, patch.object(
-            syncroot, "unmount_partition", return_value=True
-        ), patch.object(syncroot, "sync_root_partitions", return_value=True):
+        with patch.object(syncroot, "mount_partition") as mount, patch.object(
+            syncroot, "unmount_partition"
+        ), patch.object(syncroot, "sync_root_partitions"):
             assert syncroot.execute_syncroot() == 0
         mount.assert_called_once_with("/dev/mmcblk0p3", tmp_path / "root-up")
 

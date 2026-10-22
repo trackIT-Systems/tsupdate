@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import pytest
 
 from tsupdate import restore
+from tsupdate.errors import UpdateError
 
 IMG = b"\x00REAL-IMAGE" * 500
 
@@ -50,7 +51,12 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(restore, "remove_loopback", lambda dev: True)
     monkeypatch.setattr(restore, "get_partition_device", lambda dev, part: str(e.partition))
     monkeypatch.setattr(restore, "mount_context", mount_context)
-    monkeypatch.setattr(restore, "sync_root_partitions", lambda **kw: e.sync_ok)
+
+    def sync_root_partitions(**kw):
+        if not e.sync_ok:
+            raise UpdateError("Rsync failed: Command 'rsync' returned non-zero exit status 23.")
+
+    monkeypatch.setattr(restore, "sync_root_partitions", sync_root_partitions)
     return e
 
 
@@ -112,7 +118,8 @@ class TestCleanup:
     def test_failed_sync_keeps_the_download_for_a_retry(self, env):
         env.ensure_result = (make_download(env), False)
         env.sync_ok = False
-        assert restore.execute_restore("https://x/tsOS-base.img.gz") == 1
+        with pytest.raises(UpdateError, match="Rsync failed"):
+            restore.execute_restore("https://x/tsOS-base.img.gz")
         assert [p.name for p in env.artifacts.iterdir()] == ["tsOS-base.img.gz"]
 
     def test_local_file_is_never_deleted(self, env, tmp_path):

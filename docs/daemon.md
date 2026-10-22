@@ -357,16 +357,34 @@ sudo tsupdated -s /etc/tsupdate/maintenance.yml
 
 ### Error Handling
 
-The daemon is designed to never crash:
+The daemon is designed to never crash. Helpers do not log their failures; they raise one of the
+errors from [`errors.py`](../src/tsupdate/errors.py), and `None` from a helper only ever means
+"nothing to do" (no update, no matching release). The main loop is the one place that logs a failure,
+once per change of state:
 
-- **Configuration Errors**: Use defaults if config is missing/invalid
-- **Schedule Errors**: Log warnings but continue operation (updates can be applied at any time)
-- **Update Check Errors**: Log and retry at next interval
-- **Update Application Errors**: Log, clean up, return to main loop
-- **Network Errors**: Log and retry at next interval
-- **GitHub API Errors**: Log and retry at next interval
+| Error | Examples | Logged at |
+| --- | --- | --- |
+| `TransientError` | no network, DNS failure, connection refused/reset, timeout, GitHub 5xx, GitHub rate limit (403/429), interrupted download | WARNING, no traceback |
+| `ConfigurationError` | repository, release or asset not found (404), access denied (401, 403), update source not in `trackIT-Systems`, maintenance window that cannot be evaluated, scheduleparse missing | ERROR, no traceback |
+| `UpdateError` (any other) | corrupt archive, version mismatch, rsync or mount failure, rsync timeout, failed verification of a download, untrusted redirect | ERROR, no traceback |
+| any other exception | a bug | ERROR with traceback |
 
-All exceptions are caught, logged with full stack trace, and the daemon continues operation.
+Failures are tracked per stage of the loop: evaluating the maintenance window, checking for updates,
+downloading the update, applying the update, and the rest of the loop. Within a stage, a failure is logged
+when it starts and again only when its message (or class) changes; the repeats go to DEBUG ("... failed
+again: ..."). When the stage works again, that is logged once at INFO, e.g. "Checking for updates works
+again". An offline station therefore logs one WARNING when it loses the network and one INFO when it is back.
+
+What the daemon does after a failure:
+
+- **Update check, download or apply failed**: treated as "no update"; the next check follows after the
+  usual delay (`check_interval`, or the start of the next maintenance window). Users are notified via `wall`
+  when an apply fails.
+- **Maintenance window cannot be evaluated**: the daemon behaves as outside the window and waits
+  `check_interval` between checks.
+- **Anything else in the loop**: retried after 60 seconds.
+- **Configuration file**: missing or out-of-range values use the defaults; values of the wrong type stop
+  the daemon at startup.
 
 ## Signal Handling
 
@@ -398,16 +416,20 @@ Under systemd the daemon logs to the journal (`journalctl -u tsupdated`), with t
 
 ### Log Levels
 
-**ERROR**: an operation failed and needs attention
-- "Failed to sync root partition - aborting update"
-- "Failed to apply update - aborting"
-- "Error in main loop, continuing operation: ..." (once when the error starts or changes; "Main loop works again" at INFO once it recovers)
+**ERROR**: an operation failed and needs attention (once when it starts or changes, see [Error Handling](#error-handling))
+- "Checking for updates failed: Repository not found: trackIT-Systems/...; ..."
+- "Applying the update failed: Rsync failed with exit code 23: ..."
+- "Evaluating the maintenance window failed: Cannot evaluate the maintenance window (02:00 - 3:OO): ..."
+- "Main loop failed: RuntimeError: ..." (with traceback: an unexpected error)
 
 **WARNING**: something unexpected that was handled
+- "Checking for updates failed: Cannot reach GitHub: Failed to resolve 'api.github.com' (...)" (once while offline)
+- "Downloading the update failed: Download of ... interrupted at ... of ... bytes"
 - "Configuration file not found, using default configuration: ..."
 - "Not applying ...: it was already attempted ... times ..." (once per update)
 
 **INFO** (not shown at the default level): one-off events
+- "Checking for updates works again" (and likewise for the other stages), once after a failure
 - "Update found (mode: check), deferring update until the next check: ..." (once per update, not on every check)
 - "Entering maintenance window (...)" / "Leaving maintenance window (...)"
 - "Update applied successfully"

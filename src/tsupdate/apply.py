@@ -9,6 +9,7 @@ import tarfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from tsupdate.errors import UpdateError, timeout_error
 from tsupdate.status import read_os_release
 from tsupdate.syncroot import (
     can_run_syncroot,
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 EXTRACT_DIR = ARTIFACTS_DIR / "extract"
 
 
-def extract_update_archive(archive_path: Path) -> Optional[Path]:
+def extract_update_archive(archive_path: Path) -> Path:
     """
     Extract tar archive to EXTRACT_DIR.
 
@@ -36,32 +37,32 @@ def extract_update_archive(archive_path: Path) -> Optional[Path]:
         archive_path: Path to tar archive file
 
     Returns:
-        Path to extracted directory, or None on error
+        Path to extracted directory
+
+    Raises:
+        UpdateError: The archive does not exist or cannot be extracted.
     """
     if not archive_path.exists():
-        logger.error("Update file does not exist: %s", archive_path)
-        return None
+        raise UpdateError(f"Update file does not exist: {archive_path}")
 
     try:
         shutil.rmtree(EXTRACT_DIR, ignore_errors=True)
         EXTRACT_DIR.mkdir(parents=True, mode=0o700)
         logger.debug("Created extraction directory: %s", EXTRACT_DIR)
     except OSError as e:
-        logger.error("Could not create extraction directory %s: %s", EXTRACT_DIR, e)
-        return None
+        raise UpdateError(f"Could not create extraction directory {EXTRACT_DIR}: {e}") from e
 
     try:
         with tarfile.open(archive_path, "r:*") as tar:
             tar.extractall(EXTRACT_DIR, filter="data")
-        logger.debug("Extracted archive %s to %s", archive_path, EXTRACT_DIR)
-        return EXTRACT_DIR
     except (tarfile.TarError, OSError) as e:
-        logger.error("Could not extract archive %s: %s", archive_path, e)
         shutil.rmtree(EXTRACT_DIR, ignore_errors=True)
-        return None
+        raise UpdateError(f"Could not extract archive {archive_path}: {e}") from e
+    logger.debug("Extracted archive %s to %s", archive_path, EXTRACT_DIR)
+    return EXTRACT_DIR
 
 
-def parse_batch_metadata(batch_sh_path: Path) -> Optional[Dict[str, str]]:
+def parse_batch_metadata(batch_sh_path: Path) -> Dict[str, str]:
     """
     Parse metadata from batch.sh file.
     
@@ -69,11 +70,13 @@ def parse_batch_metadata(batch_sh_path: Path) -> Optional[Dict[str, str]]:
         batch_sh_path: Path to batch.sh file
         
     Returns:
-        Dictionary of metadata variables, or None on error
+        Dictionary of metadata variables
+
+    Raises:
+        UpdateError: batch.sh does not exist or cannot be read.
     """
     if not batch_sh_path.exists():
-        logger.error("batch.sh not found: %s", batch_sh_path)
-        return None
+        raise UpdateError(f"batch.sh not found: {batch_sh_path}")
     
     metadata = {}
     
@@ -103,11 +106,10 @@ def parse_batch_metadata(batch_sh_path: Path) -> Optional[Dict[str, str]]:
         logger.debug("Parsed metadata from batch.sh: %s", metadata)
         return metadata
     except (OSError, IOError, UnicodeDecodeError) as e:
-        logger.error("Could not parse batch.sh: %s", e)
-        return None
+        raise UpdateError(f"Could not parse batch.sh: {e}") from e
 
 
-def extract_rsync_command_from_batch_sh(batch_sh_path: Path) -> Optional[Tuple[List[str], str]]:
+def extract_rsync_command_from_batch_sh(batch_sh_path: Path) -> Tuple[List[str], Optional[str]]:
     """
     Extract rsync command options and filter rules from batch.sh file.
     
@@ -115,11 +117,13 @@ def extract_rsync_command_from_batch_sh(batch_sh_path: Path) -> Optional[Tuple[L
         batch_sh_path: Path to batch.sh file
         
     Returns:
-        Tuple of (rsync_options_list, filter_rules_string), or None on error
+        Tuple of (rsync_options_list, filter_rules_string)
+
+    Raises:
+        UpdateError: batch.sh does not exist, cannot be read or has no rsync command.
     """
     if not batch_sh_path.exists():
-        logger.error("batch.sh not found: %s", batch_sh_path)
-        return None
+        raise UpdateError(f"batch.sh not found: {batch_sh_path}")
     
     try:
         with open(batch_sh_path, "r", encoding="utf-8") as f:
@@ -133,8 +137,7 @@ def extract_rsync_command_from_batch_sh(batch_sh_path: Path) -> Optional[Tuple[L
                 break
         
         if rsync_line_idx is None:
-            logger.warning("Could not find rsync command in batch.sh")
-            return None
+            raise UpdateError("Could not find rsync command in batch.sh")
         
         rsync_line = lines[rsync_line_idx].strip()
         logger.debug("Found rsync command line: %s", rsync_line)
@@ -142,8 +145,7 @@ def extract_rsync_command_from_batch_sh(batch_sh_path: Path) -> Optional[Tuple[L
         # Extract heredoc marker
         heredoc_match = re.search(r'<<[\'"]?([^\'"\s]+)[\'"]?', rsync_line)
         if not heredoc_match:
-            logger.warning("Could not find heredoc marker in rsync command")
-            return None
+            raise UpdateError("Could not find heredoc marker in the rsync command of batch.sh")
         
         heredoc_marker = heredoc_match.group(1)
         logger.debug("Found heredoc marker: %s", heredoc_marker)
@@ -192,8 +194,7 @@ def extract_rsync_command_from_batch_sh(batch_sh_path: Path) -> Optional[Tuple[L
         return (rsync_options, filter_rules_str)
         
     except (OSError, IOError, UnicodeDecodeError) as e:
-        logger.error("Could not extract rsync command from batch.sh: %s", e)
-        return None
+        raise UpdateError(f"Could not extract rsync command from batch.sh: {e}") from e
 
 
 def find_rsync_batch_file(extracted_dir: Path, update_filename: str) -> Optional[Path]:
@@ -283,25 +284,26 @@ def apply_rsync_batch(
         
     Returns:
         Rsync exit code
+
+    Raises:
+        TransientError: rsync ran into its timeout (exit code 124).
+        UpdateError: The batch file or target directory is missing, or rsync cannot be run.
     """
     logger.debug("Preparing to apply rsync batch file: %s", batch_file)
     logger.debug("Target directory: %s", target_dir)
     
     # Verify batch file exists
     if not batch_file.exists():
-        logger.error("Rsync batch file does not exist: %s", batch_file)
-        return 1
+        raise UpdateError(f"Rsync batch file does not exist: {batch_file}")
     
     logger.debug("Batch file exists, size: %s bytes", batch_file.stat().st_size)
     
     # Verify target directory exists and is accessible
     if not target_dir.exists():
-        logger.error("Target directory does not exist: %s", target_dir)
-        return 1
+        raise UpdateError(f"Target directory does not exist: {target_dir}")
     
     if not target_dir.is_dir():
-        logger.error("Target path is not a directory: %s", target_dir)
-        return 1
+        raise UpdateError(f"Target path is not a directory: {target_dir}")
     
     logger.debug("Target directory exists and is accessible")
     
@@ -356,22 +358,16 @@ def apply_rsync_batch(
     
     try:
         result = subprocess.run(rsync_cmd, **run_kw)
-        logger.debug("Rsync command completed with exit code: %s", result.returncode)
-        return result.returncode
-    except subprocess.TimeoutExpired:
-        limit = f"{int(timeout)}s" if timeout is not None else "unlimited"
-        logger.error(
-            "Rsync timed out (limit was %s); increase rsync_timeout in tsupdate.yml "
-            "or pass --rsync-timeout (0 = no limit)",
-            limit,
-        )
-        return 124
-    except FileNotFoundError:
-        logger.error("Command not found: rsync")
-        return 1
-    except Exception as e:
-        logger.error("Unexpected error executing rsync: %s", e)
-        return 1
+    except subprocess.TimeoutExpired as e:
+        raise timeout_error(
+            e, "Rsync", "increase rsync_timeout in tsupdate.yml or pass --rsync-timeout (0 = no limit)"
+        ) from e
+    except FileNotFoundError as e:
+        raise UpdateError("Command not found: rsync") from e
+    except OSError as e:
+        raise UpdateError(f"Cannot run rsync: {e}") from e
+    logger.debug("Rsync command completed with exit code: %s", result.returncode)
+    return result.returncode
 
 
 def handle_rsync_exit_code(exit_code: int) -> str:
@@ -413,23 +409,23 @@ def execute_apply(
         rsync_timeout_sec: Wall-clock limit for rsync in seconds (None = default 3600; 0 = unlimited)
         
     Returns:
-        Exit code (0 for success, non-zero for failure)
+        0 (success)
+
+    Raises:
+        UpdateError: The update cannot be applied now, cannot be downloaded (see
+            ensure_file()), is invalid or does not fit the inactive partition, or rsync failed.
+            A failed rsync carries rsync's exit code as exit_code.
     """
     logger.debug("Starting apply process for update source: %s", update_source)
     
     # Check if apply can be run
-    logger.debug("Checking if apply can be run (regular boot or persisted tryboot)")
     if not can_run_syncroot():
-        logger.error("The apply command can only be run when booted regularly or when tryboot is persisted")
-        return 1
-    logger.debug("Apply can be run")
+        raise UpdateError("The apply command can only be run when booted regularly or when tryboot is persisted")
     
     # Get inactive partition device
-    logger.debug("Getting inactive partition device")
     device = get_inactive_partition_device()
     if not device:
-        logger.error("Could not determine inactive partition")
-        return 1
+        raise UpdateError("Could not determine inactive partition")
     logger.debug("Inactive partition device: %s", device)
     
     # Get partition info for user feedback
@@ -440,149 +436,88 @@ def execute_apply(
         logger.info("Inactive partition: %s (p%s)", label, partition_num)
     
     # Ensure file is available (download from URL if needed)
-    artifacts_path = ARTIFACTS_DIR
-    update_file_path = None
-    is_local_file = False
-    extracted_dir = None
-    temp_dir_cleanup = True
+    update_file_path, is_local_file = ensure_file(update_source, ARTIFACTS_DIR)
+    logger.debug("Update file path: %s", update_file_path.resolve())
     
+    extracted_dir = None
     try:
-        update_file_path, is_local_file = ensure_file(update_source, artifacts_path)
-        if update_file_path is None:
-            logger.error("Failed to obtain update file")
-            return 1
-        
-        logger.debug("Update file path: %s", update_file_path)
-        logger.debug("Update file absolute path: %s", update_file_path.resolve())
-        
         # Extract update archive
         logger.debug("Extracting update archive: %s", update_file_path)
         extracted_dir = extract_update_archive(update_file_path)
-        if not extracted_dir:
-            logger.error("Failed to extract update archive")
-            return 1
         logger.debug("Update archive extracted to: %s", extracted_dir)
         
         # Find batch.sh file
         batch_sh = extracted_dir / "batch.sh"
         if not batch_sh.exists():
-            logger.error("batch.sh not found in update archive")
-            return 1
+            raise UpdateError("batch.sh not found in update archive")
         
         # Parse metadata
         metadata = parse_batch_metadata(batch_sh)
-        if not metadata:
-            return 1
-        
         base_pretty_name = metadata.get("BASE_PRETTY_NAME")
         updated_pretty_name = metadata.get("UPDATED_PRETTY_NAME")
         base_image = metadata.get("BASE_IMAGE", "unknown")
         updated_image = metadata.get("UPDATED_IMAGE", "unknown")
         
         if not base_pretty_name:
-            logger.error("BASE_PRETTY_NAME not found in batch.sh metadata")
-            return 1
+            raise UpdateError("BASE_PRETTY_NAME not found in batch.sh metadata")
         
         logger.info("Base image: %s (%s)", base_image, base_pretty_name)
         logger.info("Updated image: %s (%s)", updated_image, updated_pretty_name)
         
         # Mount inactive partition and apply update
         logger.debug("Mounting %s to %s", device, ROOT_UP)
-        try:
-            with mount_context(device, ROOT_UP) as mount_point:
-                logger.info("Mounted %s to %s", device, mount_point)
-                logger.debug("Verifying mount point: %s", mount_point)
-                logger.debug("Mount point exists: %s", mount_point.exists())
-                logger.debug("Mount point is directory: %s", mount_point.is_dir())
-                
-                # Check version compatibility
-                target_os_release = mount_point / "etc" / "os-release"
-                logger.debug("Checking version compatibility with: %s", target_os_release)
-                is_compatible, found_pretty_name = check_version_compatibility(base_pretty_name, target_os_release)
-                logger.debug(
-                    "Version compatibility check result: compatible=%s, found_pretty_name=%s",
-                    is_compatible,
-                    found_pretty_name,
+        with mount_context(device, ROOT_UP) as mount_point:
+            logger.info("Mounted %s to %s", device, mount_point)
+            
+            # Check version compatibility
+            target_os_release = mount_point / "etc" / "os-release"
+            logger.debug("Checking version compatibility with: %s", target_os_release)
+            is_compatible, found_pretty_name = check_version_compatibility(base_pretty_name, target_os_release)
+            if not is_compatible:
+                raise UpdateError(
+                    f"Version mismatch: this update is designed for base version {base_pretty_name}, "
+                    f"found target version {found_pretty_name}"
                 )
-                
-                if not is_compatible:
-                    logger.error(
-                        "Version mismatch: this update is designed for base version %s, found target version %s",
-                        base_pretty_name,
-                        found_pretty_name,
+            
+            # Extract rsync command and filter rules from batch.sh
+            logger.debug("Extracting rsync command and filter rules from batch.sh")
+            rsync_options, filter_rules = extract_rsync_command_from_batch_sh(batch_sh)
+            if not rsync_options:
+                raise UpdateError("No rsync options found in batch.sh")
+            
+            # Find rsync batch file, by the original source filename
+            logger.debug("Looking for rsync batch file in extracted directory: %s", extracted_dir)
+            batch_file = find_rsync_batch_file(extracted_dir, Path(update_source).name)
+            if not batch_file:
+                logger.debug("Contents of extracted directory: %s", list(extracted_dir.iterdir()))
+                raise UpdateError("Could not find rsync batch file in update archive")
+            
+            logger.info("Found rsync batch file: %s", batch_file)
+            
+            logger.info("Applying update to %s, this will modify files in the target directory", mount_point)
+            exit_code = apply_rsync_batch(
+                batch_file,
+                mount_point,
+                rsync_options,
+                filter_rules,
+                rsync_timeout_sec=rsync_timeout_sec,
+            )
+            logger.debug("apply_rsync_batch returned with exit code: %s", exit_code)
+            
+            message = handle_rsync_exit_code(exit_code)
+            if exit_code != 0:
+                message = message.removeprefix("Error: ")
+                if exit_code in (23, 24):
+                    message += (
+                        "; if PRETTY_NAME matched but rsync still failed, the inactive partition "
+                        "is probably not a byte-accurate clone of the running root; run "
+                        "`tsupdate syncroot` (with checksum sync) or restore the partition"
                     )
-                    return 1
-                
-                # Extract rsync command and filter rules from batch.sh
-                logger.debug("Extracting rsync command and filter rules from batch.sh")
-                rsync_config = extract_rsync_command_from_batch_sh(batch_sh)
-                if rsync_config is None:
-                    logger.error("Could not extract rsync command from batch.sh")
-                    return 1
-                
-                rsync_options, filter_rules = rsync_config
-                
-                if not rsync_options:
-                    logger.error("No rsync options found in batch.sh")
-                    return 1
-                
-                # Find rsync batch file
-                logger.debug("Looking for rsync batch file in extracted directory: %s", extracted_dir)
-                # Use original source filename for finding batch file
-                source_filename = Path(update_source).name
-                batch_file = find_rsync_batch_file(extracted_dir, source_filename)
-                if not batch_file:
-                    logger.error("Could not find rsync batch file in update archive")
-                    logger.debug("Contents of extracted directory: %s", list(extracted_dir.iterdir()))
-                    return 1
-                
-                logger.info("Found rsync batch file: %s", batch_file)
-                logger.debug("Batch file absolute path: %s", batch_file.resolve())
-                
-                # Verify target mount point
-                logger.debug("Verifying target mount point: %s", mount_point)
-                if not mount_point.exists():
-                    logger.error("Target mount point does not exist: %s", mount_point)
-                    return 1
-                
-                logger.debug("Target mount point exists: %s", mount_point)
-                
-                logger.info("Applying update to %s, this will modify files in the target directory", mount_point)
-                logger.debug(
-                    "About to call apply_rsync_batch with batch_file=%s, target_dir=%s",
-                    batch_file,
-                    mount_point,
-                )
-                
-                # Apply rsync batch
-                exit_code = apply_rsync_batch(
-                    batch_file,
-                    mount_point,
-                    rsync_options,
-                    filter_rules,
-                    rsync_timeout_sec=rsync_timeout_sec,
-                )
-                
-                logger.debug("apply_rsync_batch returned with exit code: %s", exit_code)
-                
-                message = handle_rsync_exit_code(exit_code)
-                if exit_code == 0:
-                    logger.info(message)
-                else:
-                    logger.error(message)
-                    if exit_code in (23, 24):
-                        logger.error(
-                            "If PRETTY_NAME matched but rsync still failed, the inactive partition "
-                            "is probably not a byte-accurate clone of the running root; run "
-                            "`tsupdate syncroot` (with checksum sync) or restore the partition"
-                        )
-                    return exit_code
-        except RuntimeError as e:
-            logger.error(str(e))
-            return 1
+                raise UpdateError(f"Rsync failed with exit code {exit_code}: {message}", exit_code=exit_code)
+            logger.info(message)
     finally:
         # Cleanup temporary directory
-        if temp_dir_cleanup and extracted_dir:
+        if extracted_dir:
             try:
                 shutil.rmtree(extracted_dir)
                 logger.debug("Removed temporary directory: %s", extracted_dir)
@@ -596,4 +531,3 @@ def execute_apply(
         safe_cleanup(update_file_path)
     
     return 0
-

@@ -50,6 +50,12 @@ Located in `/boot/firmware/`:
 
 **`rollback_tryboot(reboot=True)`**: Restore previous partition configuration and remove tryboot files. By default, automatically reboots the system after rollback.
 
+### Errors
+
+The functions above do not log failures; they raise `UpdateError` with the reason (e.g. "No root= parameter
+in /boot/firmware/cmdline.txt; ..."), which the CLI or the daemon reports. `execute_tryboot()`,
+`execute_persist()` and `rollback_tryboot()` return 0 on success.
+
 ## Tryboot Workflow
 
 ### Initial Setup (Regular Boot)

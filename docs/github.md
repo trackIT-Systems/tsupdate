@@ -162,28 +162,29 @@ tsupdate -v check
 
 ## Error Handling
 
-### Common Errors
+`fetch_releases()` and `resolve_github_release_asset()` do not log failures; they raise one of the errors
+from [`errors.py`](../src/tsupdate/errors.py), with the original exception as `__cause__`. An empty list
+or `None` from the `find_*` helpers means "nothing found", never "failed". `github_error()` does the
+mapping:
 
-**404 Not Found**:
-- Repository doesn't exist or is private
-- For private repos, ensure `GH_TOKEN` is set with `repo` scope
+| Source error | Raised as | Message |
+| --- | --- | --- |
+| 404 | `ConfigurationError` | "Repository not found: owner/repo; if it is a private repository, set the GH_TOKEN ..." (with a token: "... ensure your token has 'repo' scope permissions") |
+| 401 | `ConfigurationError` | "GitHub rejected the token (401 Bad credentials); ..." |
+| 403, not the rate limit | `ConfigurationError` | "GitHub denied access to owner/repo; ..." |
+| 403 rate limit (`RateLimitExceededException`, `X-RateLimit-Remaining: 0` or "rate limit" in the message), 429 | `TransientError` | "GitHub API rate limit exceeded" (without a token: "; set GH_TOKEN for a higher limit") |
+| 5xx | `TransientError` | "GitHub API error 502: ..." |
+| other status | `UpdateError` | "GitHub API error 422: ..." |
+| connection error, DNS failure (`requests`/`urllib3`, `OSError`) | `TransientError` | "Cannot reach GitHub: Failed to resolve 'api.github.com' (...)" |
+| timeout | `TransientError` | "Timed out talking to GitHub: ..." |
+| release tag or asset not found, URL not a release download URL of `trackIT-Systems` | `ConfigurationError` | "Release tag 'x' not found in owner/repo", "Asset 'x' not found in release 'y' of owner/repo", "Invalid GitHub release URL: ..." |
 
-**403 Forbidden**:
-- Rate limit exceeded
-- Token lacks required permissions
+The message of a network error is its innermost cause without urllib3's connection object, whose
+address would otherwise make every attempt's message different.
 
-**Network Errors**:
-- Connection timeout
-- DNS resolution failure
-
-### Error Messages
-
-The module provides helpful error messages:
-
-```
-Repository not found: owner/repo
-If this is a private repository, set GH_TOKEN environment variable with a token that has 'repo' scope.
-```
+`update_source(os_release, github_url)` returns `(owner, repo, version_id)` for the update check and
+raises `ConfigurationError` when there is no `SUPPORT_URL`/`github_url`, no `VERSION_ID`, or the URL is not
+`https://github.com/trackIT-Systems/<repo>`.
 
 ## PyGithub Integration
 
@@ -195,9 +196,10 @@ This module uses the PyGithub library for GitHub API access. It provides:
 
 ### Client Creation
 
-The `_create_github_client()` function handles authentication and validation:
+The `_create_github_client()` function handles authentication:
 - Creates authenticated client if token available
-- Verifies token by checking rate limit
+- Logs the remaining rate limit at DEBUG (only when debug logging is on, as it costs a request); an
+  invalid token is reported by the first real request as a 401
 - Logs authentication status in verbose mode
 
 ### Asset Access

@@ -273,6 +273,10 @@ def execute_restore(
         
     Returns:
         Exit code (0 for success, non-zero for failure)
+
+    Raises:
+        UpdateError: The image cannot be downloaded (see ensure_file()), or mounting or
+            syncing failed.
     """
     # Check if restore can be run
     if not can_run_syncroot():
@@ -306,9 +310,6 @@ def execute_restore(
     try:
         # Ensure file is available (download from URL if needed)
         downloaded_path, is_local_file = ensure_file(image_source, artifacts_path)
-        if downloaded_path is None:
-            logger.error("Failed to obtain image file")
-            return 1
         
         # Check if image needs extraction
         image_path = downloaded_path
@@ -376,26 +377,19 @@ def execute_restore(
         
         logger.info("Using partition %s from image: %s", partition, partition_device)
         
-        # Mount image partition and inactive partition, then sync
-        try:
-            with mount_context(partition_device, IMAGE_MOUNT) as image_mount:
-                logger.info("Mounted %s to %s", partition_device, image_mount)
+        # Mount image partition and inactive partition, then sync (failures raise UpdateError)
+        with mount_context(partition_device, IMAGE_MOUNT) as image_mount:
+            logger.info("Mounted %s to %s", partition_device, image_mount)
+            
+            with mount_context(device, ROOT_UP) as target_mount:
+                logger.info("Mounted %s to %s", device, target_mount)
                 
-                with mount_context(device, ROOT_UP) as target_mount:
-                    logger.info("Mounted %s to %s", device, target_mount)
-                    
-                    # Sync from image to inactive partition
-                    logger.info("Syncing %s to %s", image_mount, target_mount)
-                    
-                    sync_success = sync_root_partitions(source=image_mount, destination=target_mount)
-                    if sync_success:
-                        logger.info("Sync completed successfully")
-                    
-                    success = sync_success
-                    return 0 if sync_success else 1
-        except RuntimeError as e:
-            logger.error(str(e))
-            return 1
+                # Sync from image to inactive partition
+                logger.info("Syncing %s to %s", image_mount, target_mount)
+                sync_root_partitions(source=image_mount, destination=target_mount)
+                logger.info("Sync completed successfully")
+                success = True
+                return 0
         
     finally:
         

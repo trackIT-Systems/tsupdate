@@ -9,7 +9,8 @@ from urllib.parse import urlparse
 
 import requests
 
-from tsupdate.github import ALLOWED_OWNER, parse_github_release_url, resolve_github_release_asset, get_github_token
+from tsupdate.errors import ConfigurationError, TransientError, UpdateError, network_error
+from tsupdate.github import ALLOWED_OWNER, resolve_github_release_asset, get_github_token
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +203,7 @@ def download_file(
     output_path: Path,
     expected_size: Optional[int] = None,
     expected_digest: Optional[str] = None,
-) -> bool:
+) -> None:
     """
     Download file from URL with resumable download support.
     
@@ -221,8 +222,12 @@ def download_file(
         expected_digest: If known, the asset's content digest as returned by
             the GitHub API (e.g. "sha256:<hex>").
 
-    Returns:
-        True if successful, False otherwise
+    Raises:
+        TransientError: The server is unreachable, timed out, returned 5xx or 429, or the
+            download was interrupted. A partial download is kept and resumed next time.
+        ConfigurationError: The server denied access or does not have the file (401, 403, 404).
+        UpdateError: The download was redirected to an untrusted host, failed verification,
+            or could not be written.
     """
     temp_path = output_path.with_suffix(output_path.suffix + ".tmp")
     
@@ -291,7 +296,9 @@ def download_file(
                 response = requests.get(url, headers=headers, stream=True, timeout=30)
         
         # Check for errors
-        response.raise_for_status()
+        if response.status_code >= 400:
+            response.close()
+            raise _http_error(response.status_code, url)
 
         # requests follows redirects by default, so the actual bytes could come
         # from somewhere other than the URL we requested (that's expected for
@@ -300,9 +307,8 @@ def download_file(
         # request that started at github.com/api.github.com can't be redirected
         # to an arbitrary attacker-controlled host.
         if not _is_allowed_asset_response_host(response.url):
-            logger.error("Refusing download: response URL is not a trusted GitHub asset host: %s", response.url)
             response.close()
-            return False
+            raise UpdateError(f"Refusing download: response URL is not a trusted GitHub asset host: {response.url}")
 
         # Get total size
         total_size = None
@@ -334,9 +340,8 @@ def download_file(
         
         # Verify download completed
         if total_size and downloaded < total_size:
-            logger.warning("Download incomplete: %s/%s bytes", downloaded, total_size)
             # Keep temp file for resume on next attempt
-            return False
+            raise TransientError(f"Download of {url} interrupted at {downloaded} of {total_size} bytes")
 
         # Verify the completed file against known-good metadata before trusting
         # it, whether this was a fresh download or a resumed one - a resume
@@ -346,9 +351,8 @@ def download_file(
         if expected_size is not None or expected_digest is not None:
             ok, reason = _verify_file(temp_path, expected_size, expected_digest)
             if not ok:
-                logger.error("Downloaded file failed verification, discarding: %s", reason)
                 safe_cleanup(temp_path)
-                return False
+                raise UpdateError(f"Downloaded file failed verification and was discarded: {reason}")
             logger.debug("Downloaded file verified: %s", reason)
 
         # Rename temporary file to final path (atomic operation)
@@ -357,18 +361,31 @@ def download_file(
             logger.info("Resumed and completed download to %s", output_path)
         else:
             logger.info("Downloaded file to %s", output_path)
-        return True
     except requests.exceptions.RequestException as e:
-        logger.error("Failed to download file: %s", e)
         # Keep temporary file for resume on next attempt
-        return False
-    except Exception as e:
-        logger.error("Failed to download file: %s", e)
-        # Keep temporary file for resume on next attempt
-        return False
+        raise network_error(e, urlparse(url).hostname or url) from e
+    except (ConnectionError, TimeoutError) as e:
+        # socket-level errors that urllib3 did not wrap; also kept for resume
+        raise TransientError(f"Download of {url} interrupted: {e}") from e
+    except OSError as e:
+        raise UpdateError(f"Cannot write {temp_path}: {e}") from e
+    except ValueError as e:
+        # e.g. a malformed Content-Length from a proxy
+        raise TransientError(f"Invalid response downloading {url}: {e}") from e
 
 
-def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Optional[Path], bool]:
+def _http_error(status: int, url: str) -> UpdateError:
+    """Map an HTTP error status of a download to an UpdateError."""
+    message = f"Download of {url} failed with HTTP {status}"
+    if status >= 500 or status == 429:
+        return TransientError(message)
+    if status in (401, 403, 404):
+        hint = "" if get_github_token() else "; for a private repository, set GH_TOKEN"
+        return ConfigurationError(message + hint)
+    return UpdateError(message)
+
+
+def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Path, bool]:
     """
     Ensure a file is available locally, downloading from URL if needed.
     
@@ -384,8 +401,14 @@ def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Opt
         
     Returns:
         Tuple of (file_path, is_local) where:
-        - file_path: Path to the file (or None on error)
+        - file_path: Path to the file
         - is_local: True if source was a local file, False if downloaded from URL
+
+    Raises:
+        ConfigurationError: The source is neither an existing file nor an allowed URL, or the
+            release or asset does not exist.
+        TransientError: GitHub is unreachable, rate limited, or the download was interrupted.
+        UpdateError: Any other failure to resolve, download, verify or store the file.
     """
     if artifacts_path is None:
         artifacts_path = ARTIFACTS_DIR
@@ -405,8 +428,11 @@ def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Opt
     # the GitHub-release-URL shape below would otherwise fall through to the
     # generic "download whatever URL we were given" path untouched.
     if not is_allowed_source_url(source):
-        logger.error("Refusing update source (not a github.com/api.github.com URL for '%s'): %s", ALLOWED_OWNER, source)
-        return (None, False)
+        if "://" not in source:
+            raise ConfigurationError(f"File not found: {source}")
+        raise ConfigurationError(
+            f"Refusing update source (not a github.com/api.github.com URL for '{ALLOWED_OWNER}'): {source}"
+        )
 
     # Check if this is a GitHub release URL
     download_url = source
@@ -432,9 +458,6 @@ def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Opt
         # possible would mean that check silently never runs for the common
         # "public repo, no GH_TOKEN" case - the one most deployments are in.
         asset = resolve_github_release_asset(source)
-        if not asset:
-            logger.error("Failed to resolve GitHub release URL: %s", source)
-            return (None, False)
         download_url = asset["url"]
         asset_size = asset.get("size")
         asset_digest = asset.get("digest")
@@ -471,8 +494,7 @@ def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Opt
         artifacts_path.mkdir(parents=True, exist_ok=True)
         logger.debug("Using artifacts directory: %s", artifacts_path)
     except OSError as e:
-        logger.error("Could not create artifacts directory %s: %s", artifacts_path, e)
-        return (None, False)
+        raise UpdateError(f"Could not create artifacts directory {artifacts_path}: {e}") from e
     
     # Check if file already exists (preserve .tmp files for resumable downloads).
     # /data is a world-writable filesystem, so this cache is not trustworthy on
@@ -503,8 +525,7 @@ def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Opt
 
     # Download file
     logger.info("Downloading file from URL: %s", download_url)
-    if not download_file(download_url, downloaded_path, expected_size=asset_size, expected_digest=asset_digest):
-        return (None, False)
+    download_file(download_url, downloaded_path, expected_size=asset_size, expected_digest=asset_digest)
 
     return (downloaded_path, False)
 

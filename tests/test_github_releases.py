@@ -3,7 +3,14 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+import requests
+import urllib3.connection
+import urllib3.exceptions
+from github import GithubException, RateLimitExceededException
+
 from tsupdate import github
+from tsupdate.errors import ConfigurationError, TransientError, UpdateError
 
 
 def release(tag, *names, prerelease=False, sizes=None):
@@ -127,6 +134,122 @@ class TestFetchReleases:
             assert len(github.fetch_releases("o", "x", limit=5)) == 1
 
 
+def offline_error():
+    """What requests raises without DNS, wrapped like urllib3 does it (connection object and all)."""
+    conn = urllib3.connection.HTTPSConnection("api.github.com", 443)
+    cause = urllib3.exceptions.NameResolutionError(
+        "api.github.com", conn, OSError("[Errno -3] Temporary failure in name resolution")
+    )
+    retry = urllib3.exceptions.MaxRetryError(None, "/repos/trackIT-Systems/tsOS-base", reason=cause)
+    return requests.exceptions.ConnectionError(retry)
+
+
+class TestErrorClassification:
+    """Errors of a GitHub request are raised as the UpdateError class the daemon logs them by."""
+
+    def fetch_raising(self, error, token=None, monkeypatch=None):
+        monkeypatch.setattr(github, "_github_token", token)
+        client = MagicMock()
+        client.get_repo.side_effect = error
+        with patch.object(github, "_create_github_client", return_value=client), pytest.raises(UpdateError) as exc:
+            github.fetch_releases("trackIT-Systems", "tsOS-base")
+        assert exc.value.__cause__ is error
+        return exc.value
+
+    @pytest.mark.parametrize(
+        "error,token,cls,message",
+        [
+            (GithubException(404, {"message": "Not Found"}, None), None, ConfigurationError,
+             "Repository not found: trackIT-Systems/tsOS-base; if it is a private repository, set the GH_TOKEN"),
+            (GithubException(404, {"message": "Not Found"}, None), "t", ConfigurationError,
+             ("Repository not found or access denied: trackIT-Systems/tsOS-base; if it is a private repository, "
+              "ensure your token has 'repo' scope")),
+            (GithubException(403, {"message": "Resource not accessible"}, None), None, ConfigurationError,
+             "GitHub denied access to trackIT-Systems/tsOS-base"),
+            (GithubException(403, {"message": "Resource not accessible"}, None), "t", ConfigurationError,
+             "GitHub denied access to trackIT-Systems/tsOS-base; check that your token"),
+            (GithubException(401, {"message": "Bad credentials"}, None), "t", ConfigurationError,
+             "GitHub rejected the token"),
+            (RateLimitExceededException(403, {"message": "API rate limit exceeded for 1.2.3.4."}, None), None,
+             TransientError, "GitHub API rate limit exceeded; set GH_TOKEN for a higher limit"),
+            (GithubException(403, {"message": "x"}, {"X-RateLimit-Remaining": "0"}), "t", TransientError,
+             "GitHub API rate limit exceeded"),
+            (GithubException(429, {"message": "Too Many Requests"}, None), "t", TransientError,
+             "GitHub API rate limit exceeded"),
+            (GithubException(502, {"message": "Server Error"}, None), None, TransientError,
+             "GitHub API error 502: Server Error"),
+            (GithubException(422, {"message": "Validation Failed"}, None), None, UpdateError,
+             "GitHub API error 422: Validation Failed"),
+            (offline_error(), None, TransientError,
+             "Cannot reach GitHub: Failed to resolve 'api.github.com'"),
+            (requests.exceptions.ConnectionError("Connection refused"), None, TransientError,
+             "Cannot reach GitHub: Connection refused"),
+            (requests.exceptions.ReadTimeout("Read timed out. (read timeout=15)"), None, TransientError,
+             "Timed out talking to GitHub: Read timed out"),
+            (TimeoutError("timed out"), None, TransientError, "Timed out talking to GitHub: timed out"),
+        ],
+    )
+    def test_maps_to_class_and_message(self, monkeypatch, error, token, cls, message):
+        exc = self.fetch_raising(error, token, monkeypatch)
+        assert type(exc) is cls
+        assert str(exc).startswith(message), str(exc)
+
+    def test_offline_message_is_stable(self, monkeypatch):
+        """The message must not contain anything that changes per attempt, or every check would log it."""
+        assert str(self.fetch_raising(offline_error(), None, monkeypatch)) == str(
+            self.fetch_raising(offline_error(), None, monkeypatch)
+        )
+        assert "object at 0x" not in str(self.fetch_raising(offline_error(), None, monkeypatch))
+
+    def test_token_is_never_in_the_message(self, monkeypatch):
+        exc = self.fetch_raising(GithubException(403, {"message": "x"}, None), "ghp_secret", monkeypatch)
+        assert "ghp_secret" not in str(exc)
+
+    def test_unexpected_errors_are_not_mapped(self):
+        client = MagicMock()
+        client.get_repo.side_effect = KeyError("bug")
+        with patch.object(github, "_create_github_client", return_value=client), pytest.raises(KeyError):
+            github.fetch_releases("trackIT-Systems", "tsOS-base")
+
+    def test_no_releases_is_not_an_error(self):
+        client = MagicMock()
+        client.get_repo.return_value.get_releases.return_value = iter([])
+        with patch.object(github, "_create_github_client", return_value=client):
+            assert github.fetch_releases("trackIT-Systems", "tsOS-base") == []
+
+
+class TestUpdateSource:
+    def os_release(self, **fields):
+        from tsupdate.status import OSRelease
+
+        return OSRelease(fields)
+
+    def test_support_url_and_version(self):
+        rel = self.os_release(VERSION_ID="2025.12.3", SUPPORT_URL="https://github.com/trackIT-Systems/tsOS-base")
+        assert github.update_source(rel) == ("trackIT-Systems", "tsOS-base", "2025.12.3")
+
+    def test_configured_url_wins(self):
+        rel = self.os_release(VERSION_ID="1", SUPPORT_URL="https://github.com/trackIT-Systems/a")
+        assert github.update_source(rel, "https://github.com/trackIT-Systems/b")[:2] == ("trackIT-Systems", "b")
+
+    @pytest.mark.parametrize(
+        "fields,message",
+        [
+            ({"VERSION_ID": "1"}, "SUPPORT_URL not found"),
+            ({"SUPPORT_URL": "https://github.com/trackIT-Systems/a"}, "VERSION_ID not found"),
+            ({"VERSION_ID": "1", "SUPPORT_URL": "https://github.com/evil/a"}, "Not an allowed update source"),
+            ({"VERSION_ID": "1", "SUPPORT_URL": "not a url"}, "Not an allowed update source"),
+        ],
+    )
+    def test_configuration_errors(self, fields, message):
+        with pytest.raises(ConfigurationError, match=message):
+            github.update_source(self.os_release(**fields))
+
+    def test_unreadable_os_release(self):
+        with pytest.raises(UpdateError, match="Could not read /etc/os-release"):
+            github.update_source(None)
+
+
 class TestResolveReleaseAsset:
     URL = "https://github.com/trackIT-Systems/tsOS-base/releases/download/2025.12.4/tsOS-base-arm64-2025.12.4.zip"
 
@@ -148,12 +271,38 @@ class TestResolveReleaseAsset:
         assert asset["url"] == "https://api.github.com/repos/trackIT-Systems/tsOS-base/releases/assets/2"
 
     def test_unknown_asset(self, monkeypatch):
-        with patch.object(github, "_create_github_client", return_value=self._client()):
-            assert github.resolve_github_release_asset(self.URL.replace(".zip", ".nope")) is None
+        with (
+            patch.object(github, "_create_github_client", return_value=self._client()),
+            pytest.raises(ConfigurationError, match="Asset 'tsOS-base-arm64-2025.12.4.nope' not found"),
+        ):
+            github.resolve_github_release_asset(self.URL.replace(".zip", ".nope"))
+
+    def test_unknown_tag(self):
+        client = self._client()
+        client.get_repo.return_value.get_release.side_effect = GithubException(404, {"message": "Not Found"}, None)
+        with (
+            patch.object(github, "_create_github_client", return_value=client),
+            pytest.raises(ConfigurationError, match="Release tag '2025.12.4' not found"),
+        ):
+            github.resolve_github_release_asset(self.URL)
 
     def test_tag_url_without_asset_is_rejected(self):
         url = "https://github.com/trackIT-Systems/tsOS-base/releases/tag/2025.12.4"
-        assert github.resolve_github_release_asset(url) is None
+        with pytest.raises(ConfigurationError, match="asset name required"):
+            github.resolve_github_release_asset(url)
+
+    def test_disallowed_url_is_rejected(self):
+        with pytest.raises(ConfigurationError, match="Invalid GitHub release URL"):
+            github.resolve_github_release_asset("https://github.com/evil/x/releases/download/v1/a.tar")
+
+    def test_unreachable_github_is_transient(self):
+        client = self._client()
+        client.get_repo.side_effect = requests.exceptions.ConnectionError("down")
+        with (
+            patch.object(github, "_create_github_client", return_value=client),
+            pytest.raises(TransientError, match="Cannot reach GitHub: down"),
+        ):
+            github.resolve_github_release_asset(self.URL)
 
 
 class TestToken:

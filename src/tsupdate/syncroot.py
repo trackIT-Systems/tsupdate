@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
+from tsupdate.errors import UpdateError, timeout_error
 from tsupdate.status import get_inactive_partition
 from tsupdate.tryboot import is_regular_boot, is_tryboot_persisted
 from tsupdate.utils import resolve_rsync_timeout_seconds
@@ -44,7 +45,7 @@ def get_inactive_partition_device() -> Optional[str]:
     return device
 
 
-def mount_partition(device: str, mount_point: Path) -> bool:
+def mount_partition(device: str, mount_point: Path) -> None:
     """
     Mount partition to specified mount point.
     
@@ -52,60 +53,53 @@ def mount_partition(device: str, mount_point: Path) -> bool:
         device: Device path to mount (e.g., '/dev/mmcblk0p2')
         mount_point: Path where to mount the partition
         
-    Returns:
-        True if successful, False otherwise
+    Raises:
+        UpdateError: The mount point cannot be created or mount failed.
     """
     # Create mount point directory if it doesn't exist
     try:
         mount_point.mkdir(parents=True, exist_ok=True)
         logger.debug("Created mount point directory: %s", mount_point)
     except OSError as e:
-        logger.error("Could not create mount point %s: %s", mount_point, e)
-        return False
+        raise UpdateError(f"Could not create mount point {mount_point}: {e}") from e
     
     # Mount the partition
     try:
-        result = subprocess.run(
+        subprocess.run(
             ["mount", device, str(mount_point)],
             capture_output=True,
             text=True,
             check=True,
         )
-        logger.debug("Mounted %s to %s", device, mount_point)
-        return True
     except subprocess.CalledProcessError as e:
-        logger.error("Could not mount %s to %s: %s", device, mount_point, e.stderr)
-        return False
-    except FileNotFoundError:
-        logger.error("Command not found: mount")
-        return False
+        raise UpdateError(f"Could not mount {device} to {mount_point}: {(e.stderr or '').strip()}") from e
+    except FileNotFoundError as e:
+        raise UpdateError("Command not found: mount") from e
+    logger.debug("Mounted %s to %s", device, mount_point)
 
 
-def unmount_partition(mount_point: Path) -> bool:
+def unmount_partition(mount_point: Path) -> None:
     """
     Unmount partition from mount point.
     
     Args:
         mount_point: Path where partition is mounted
         
-    Returns:
-        True if successful, False otherwise
+    Raises:
+        UpdateError: umount failed.
     """
     try:
-        result = subprocess.run(
+        subprocess.run(
             ["umount", str(mount_point)],
             capture_output=True,
             text=True,
             check=True,
         )
-        logger.debug("Unmounted %s", mount_point)
-        return True
     except subprocess.CalledProcessError as e:
-        logger.error("Could not unmount %s: %s", mount_point, e.stderr)
-        return False
-    except FileNotFoundError:
-        logger.error("Command not found: umount")
-        return False
+        raise UpdateError(f"Could not unmount {mount_point}: {(e.stderr or '').strip()}") from e
+    except FileNotFoundError as e:
+        raise UpdateError("Command not found: umount") from e
+    logger.debug("Unmounted %s", mount_point)
 
 
 @contextmanager
@@ -121,22 +115,23 @@ def mount_context(device: str, mount_point: Path):
         mount_point: The path where the partition is mounted
         
     Raises:
-        RuntimeError: If mounting fails
+        UpdateError: If mounting fails. A failure to unmount is logged as a warning.
     """
-    if not mount_partition(device, mount_point):
-        raise RuntimeError(f"Failed to mount {device} to {mount_point}")
+    mount_partition(device, mount_point)
     try:
         yield mount_point
     finally:
-        if not unmount_partition(mount_point):
-            logger.warning("Could not unmount %s", mount_point)
+        try:
+            unmount_partition(mount_point)
+        except UpdateError as e:
+            logger.warning("%s", e)
 
 
 def sync_root_partitions(
     source: Optional[Path] = None,
     destination: Optional[Path] = None,
     rsync_timeout_sec: Optional[int] = None,
-) -> bool:
+) -> None:
     """
     Sync root partitions using rsync.
     
@@ -148,8 +143,9 @@ def sync_root_partitions(
         destination: Destination path to sync to (defaults to ROOT_UP)
         rsync_timeout_sec: Wall-clock limit in seconds (None = default 3600; 0 = unlimited)
     
-    Returns:
-        True if successful, False otherwise
+    Raises:
+        TransientError: rsync ran into its timeout.
+        UpdateError: rsync failed or is not installed.
     """
     if source is None:
         source = ROOT_RO
@@ -178,22 +174,30 @@ def sync_root_partitions(
             stdin=subprocess.DEVNULL,
             timeout=timeout,
         )
-        logger.debug("Rsync completed successfully")
-        return True
-    except subprocess.TimeoutExpired:
-        limit = f"{int(timeout)}s" if timeout is not None else "unlimited"
-        logger.error(
-            "Rsync timed out (limit was %s); increase rsync_timeout in tsupdate.yml "
-            "or pass --rsync-timeout (0 = no limit)",
-            limit,
-        )
-        return False
+    except subprocess.TimeoutExpired as e:
+        raise timeout_error(
+            e, "Rsync", "increase rsync_timeout in tsupdate.yml or pass --rsync-timeout (0 = no limit)"
+        ) from e
     except subprocess.CalledProcessError as e:
-        logger.error("Rsync failed: %s", e)
-        return False
-    except FileNotFoundError:
-        logger.error("Command not found: rsync")
-        return False
+        raise UpdateError(f"Rsync failed: {e}") from e
+    except FileNotFoundError as e:
+        raise UpdateError("Command not found: rsync") from e
+    logger.debug("Rsync completed successfully")
+
+
+def _inactive_device() -> str:
+    """
+    The inactive partition's device, logging which partition that is.
+
+    Raises:
+        UpdateError: The inactive partition cannot be determined.
+    """
+    inactive = get_inactive_partition()
+    if not inactive:
+        raise UpdateError("Could not determine inactive partition")
+    device, partition_num, label = inactive
+    logger.info("Inactive partition: %s (p%s)", label, partition_num)
+    return device
 
 
 def execute_syncroot(rsync_timeout_sec: Optional[int] = None) -> int:
@@ -204,39 +208,23 @@ def execute_syncroot(rsync_timeout_sec: Optional[int] = None) -> int:
         rsync_timeout_sec: Wall-clock limit for rsync in seconds (None = default 3600; 0 = unlimited)
     
     Returns:
-        Exit code (0 for success, non-zero for failure)
+        0 (success)
+
+    Raises:
+        UpdateError: The partition cannot be synced now, or mounting or rsync failed.
     """
-    # Check if syncroot can be run
     if not can_run_syncroot():
-        logger.error("The syncroot command can only be run when booted regularly or when tryboot is persisted")
-        return 1
+        raise UpdateError("The syncroot command can only be run when booted regularly or when tryboot is persisted")
     
-    # Get inactive partition device
-    device = get_inactive_partition_device()
-    if not device:
-        logger.error("Could not determine inactive partition")
-        return 1
+    device = _inactive_device()
     
-    # Get partition info for user feedback
-    inactive = get_inactive_partition()
-    if inactive:
-        _, partition_num, label = inactive
-        logger.info("Inactive partition: %s (p%s)", label, partition_num)
+    with mount_context(device, ROOT_UP) as mount_point:
+        logger.info("Mounted %s to %s", device, mount_point)
+        logger.info("Syncing %s to %s", ROOT_RO, mount_point)
+        sync_root_partitions(rsync_timeout_sec=rsync_timeout_sec)
     
-    # Mount inactive partition and sync
-    try:
-        with mount_context(device, ROOT_UP) as mount_point:
-            logger.info("Mounted %s to %s", device, mount_point)
-            
-            logger.info("Syncing %s to %s", ROOT_RO, mount_point)
-            if not sync_root_partitions(rsync_timeout_sec=rsync_timeout_sec):
-                return 1
-            
-            logger.info("Sync completed successfully")
-            return 0
-    except RuntimeError as e:
-        logger.error(str(e))
-        return 1
+    logger.info("Sync completed successfully")
+    return 0
 
 
 def execute_mount() -> int:
@@ -244,19 +232,12 @@ def execute_mount() -> int:
     Mount the inactive partition to /media/root-up.
     
     Returns:
-        Exit code (0 for success, non-zero for failure)
+        0 (success)
+
+    Raises:
+        UpdateError: The partition is already mounted, or mounting failed.
     """
-    # Get inactive partition device
-    device = get_inactive_partition_device()
-    if not device:
-        logger.error("Could not determine inactive partition")
-        return 1
-    
-    # Get partition info for user feedback
-    inactive = get_inactive_partition()
-    if inactive:
-        _, partition_num, label = inactive
-        logger.info("Inactive partition: %s (p%s)", label, partition_num)
+    device = _inactive_device()
     
     # Check if already mounted
     try:
@@ -265,17 +246,12 @@ def execute_mount() -> int:
             capture_output=True,
         )
         if result.returncode == 0:
-            logger.error("%s is already mounted", ROOT_UP)
-            return 1
+            raise UpdateError(f"{ROOT_UP} is already mounted")
     except FileNotFoundError:
         # mountpoint command not available, continue
         logger.debug("mountpoint command not available, skipping mount check")
-        pass
     
-    # Mount inactive partition
-    if not mount_partition(device, ROOT_UP):
-        return 1
-    
+    mount_partition(device, ROOT_UP)
     logger.info("Mounted %s to %s", device, ROOT_UP)
     return 0
 
@@ -285,7 +261,10 @@ def execute_unmount() -> int:
     Unmount the inactive partition from /media/root-up.
     
     Returns:
-        Exit code (0 for success, non-zero for failure)
+        0 (success)
+
+    Raises:
+        UpdateError: The partition is not mounted, or unmounting failed.
     """
     # Check if mounted
     try:
@@ -294,17 +273,11 @@ def execute_unmount() -> int:
             capture_output=True,
         )
         if result.returncode != 0:
-            logger.error("%s is not mounted", ROOT_UP)
-            return 1
+            raise UpdateError(f"{ROOT_UP} is not mounted")
     except FileNotFoundError:
         # mountpoint command not available, continue
         logger.debug("mountpoint command not available, skipping mount check")
-        pass
     
-    # Unmount partition
-    if not unmount_partition(ROOT_UP):
-        return 1
-    
+    unmount_partition(ROOT_UP)
     logger.info("Unmounted %s", ROOT_UP)
     return 0
-

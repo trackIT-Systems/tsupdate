@@ -148,10 +148,15 @@ Common download errors:
 - Timeout
 - Disk space issues
 
-On error:
-- Logs error message
-- Removes temporary file
-- Returns `False` or `(None, False)`
+`download_file()` and `ensure_file()` do not log failures, they raise (see
+[`errors.py`](../src/tsupdate/errors.py)):
+
+- `TransientError`: connection error, timeout, HTTP 5xx or 429, download interrupted. The `.tmp` file is
+  kept, so the next attempt resumes.
+- `ConfigurationError`: HTTP 401/403/404, a source that is not a `trackIT-Systems` GitHub URL, a local file
+  that does not exist, a release or asset that does not exist.
+- `UpdateError`: redirect to an untrusted host, failed verification (the `.tmp` file is removed), the file
+  or the artifacts directory cannot be written.
 
 ### Cleanup Failures
 

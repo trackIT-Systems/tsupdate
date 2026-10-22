@@ -8,6 +8,7 @@ import pytest
 
 from tsupdate import daemon
 from tsupdate import state as update_state
+from tsupdate.errors import ConfigurationError, TransientError, UpdateError
 
 
 @pytest.fixture(autouse=True)
@@ -184,7 +185,7 @@ class TestTrybootPersist:
         monkeypatch.setattr(daemon, "get_system_uptime", lambda: 900.0)
         with patch.object(daemon, "persist_boot_configuration", return_value=True):
             assert daemon.handle_tryboot_persist(600) is True
-        with patch.object(daemon, "persist_boot_configuration", return_value=False):
+        with patch.object(daemon, "persist_boot_configuration", side_effect=UpdateError("tryline.txt does not exist")):
             assert daemon.handle_tryboot_persist(600) is False
         booted_from(2, tryboot_active=False)
         assert daemon.handle_tryboot_persist(600) is True
@@ -218,9 +219,32 @@ class TestCheckForUpdates:
         from tsupdate.status import read_os_release
 
         monkeypatch.setattr(daemon, "read_booted_os_release", lambda: read_os_release(rel))
-        with patch.object(daemon, "fetch_releases") as fetch:
-            assert daemon.check_for_updates({"github_url": "https://github.com/evil/tsOS-base"}) is None
+        with patch.object(daemon, "fetch_releases") as fetch, pytest.raises(
+            ConfigurationError, match="Not an allowed update source: https://github.com/evil/tsOS-base"
+        ):
+            daemon.check_for_updates({"github_url": "https://github.com/evil/tsOS-base"})
         fetch.assert_not_called()
+
+    def test_github_errors_are_raised_not_swallowed(self, tmp_path, monkeypatch):
+        rel = tmp_path / "os-release"
+        rel.write_text('VERSION_ID="2025.12.3"\nSUPPORT_URL="https://github.com/trackIT-Systems/tsOS-base"\n')
+        from tsupdate.status import read_os_release
+
+        monkeypatch.setattr(daemon, "read_booted_os_release", lambda: read_os_release(rel))
+        with (
+            patch.object(daemon, "fetch_releases", side_effect=TransientError("Cannot reach GitHub: down")),
+            pytest.raises(TransientError),
+        ):
+            daemon.check_for_updates({})
+
+    def test_no_releases_is_no_update(self, tmp_path, monkeypatch):
+        rel = tmp_path / "os-release"
+        rel.write_text('VERSION_ID="2025.12.3"\nSUPPORT_URL="https://github.com/trackIT-Systems/tsOS-base"\n')
+        from tsupdate.status import read_os_release
+
+        monkeypatch.setattr(daemon, "read_booted_os_release", lambda: read_os_release(rel))
+        with patch.object(daemon, "fetch_releases", return_value=[]):
+            assert daemon.check_for_updates({}) is None
 
 
 class TestUpdateWorkflow:
@@ -236,19 +260,22 @@ class TestUpdateWorkflow:
         assert calls[0][1] == {"rsync_timeout_sec": 10}
         assert calls[2][1] == {"reboot": True}
 
-    def test_sync_failure_aborts(self, no_wall, tmp_path):
-        with patch.object(daemon, "execute_syncroot", return_value=1), patch.object(
+    def test_sync_failure_aborts(self, tmp_path, monkeypatch):
+        wall = []
+        monkeypatch.setattr(daemon, "notify_users", wall.append)
+        with patch.object(daemon, "execute_syncroot", side_effect=UpdateError("Rsync failed")), patch.object(
             daemon, "execute_apply"
-        ) as apply_, patch.object(daemon, "execute_tryboot") as tb:
-            assert not daemon.sync_and_apply_update(tmp_path / "u.tar", self.CFG)
+        ) as apply_, patch.object(daemon, "execute_tryboot") as tb, pytest.raises(UpdateError):
+            daemon.sync_and_apply_update(tmp_path / "u.tar", self.CFG)
         apply_.assert_not_called()
         tb.assert_not_called()
+        assert wall[-1] == "Update failed: Rsync failed"
 
     def test_apply_failure_aborts(self, no_wall, tmp_path):
         with patch.object(daemon, "execute_syncroot", return_value=0), patch.object(
-            daemon, "execute_apply", return_value=23
-        ), patch.object(daemon, "execute_tryboot") as tb:
-            assert not daemon.sync_and_apply_update(tmp_path / "u.tar", self.CFG)
+            daemon, "execute_apply", side_effect=UpdateError("Rsync failed with exit code 23", exit_code=23)
+        ), patch.object(daemon, "execute_tryboot") as tb, pytest.raises(UpdateError):
+            daemon.sync_and_apply_update(tmp_path / "u.tar", self.CFG)
         tb.assert_not_called()
 
     def test_cancelled_countdown_does_not_reboot(self, no_wall, tmp_path, monkeypatch):
@@ -260,9 +287,12 @@ class TestUpdateWorkflow:
         tb.assert_not_called()
 
     def test_download_failure_aborts(self, no_wall, monkeypatch):
-        monkeypatch.setattr(daemon, "download_update", lambda url, cfg: None)
-        with patch.object(daemon, "sync_and_apply_update") as s:
-            assert not daemon.apply_update_workflow("https://url", self.CFG)
+        def offline(url, cfg):
+            raise TransientError("Cannot reach GitHub: down")
+
+        monkeypatch.setattr(daemon, "download_update", offline)
+        with patch.object(daemon, "sync_and_apply_update") as s, pytest.raises(TransientError):
+            daemon.apply_update_workflow("https://url", self.CFG)
         s.assert_not_called()
 
 
@@ -366,27 +396,191 @@ class TestMainLoopLogging:
     def messages(records, level):
         return [r.getMessage() for r in records if r.levelname == level]
 
-    def test_repeated_error_is_logged_once_and_its_recovery_once(self, monkeypatch, caplog):
-        boom = RuntimeError("GitHub unreachable")
+    def test_unexpected_error_is_logged_once_with_traceback(self, monkeypatch, caplog):
+        boom = RuntimeError("bug")
         records = self.run(monkeypatch, caplog, {"do": "check"}, [boom, boom, boom, None, None])
-        assert self.messages(records, "ERROR") == [
-            "Error in main loop, continuing operation: RuntimeError: GitHub unreachable"
-        ]
+        assert self.messages(records, "ERROR") == ["Checking for updates failed: RuntimeError: bug"]
         error = next(r for r in records if r.levelname == "ERROR")
         assert error.exc_info is not None
-        again = [r for r in records if r.getMessage().startswith("Error in main loop again")]
+        again = [r for r in records if r.getMessage().startswith("Checking for updates failed again")]
         assert len(again) == 2
         assert all(r.levelname == "DEBUG" for r in again)
-        assert self.messages(records, "INFO").count("Main loop works again") == 1
+        assert self.messages(records, "INFO").count("Checking for updates works again") == 1
 
     def test_changed_error_is_logged_again(self, monkeypatch, caplog):
         errors = [RuntimeError("a"), RuntimeError("b"), RuntimeError("b")]
         records = self.run(monkeypatch, caplog, {"do": "check"}, errors)
         assert self.messages(records, "ERROR") == [
-            "Error in main loop, continuing operation: RuntimeError: a",
-            "Error in main loop, continuing operation: RuntimeError: b",
+            "Checking for updates failed: RuntimeError: a",
+            "Checking for updates failed: RuntimeError: b",
         ]
-        assert "Main loop works again" not in self.messages(records, "INFO")
+        assert "Checking for updates works again" not in self.messages(records, "INFO")
+
+    def test_offline_station_warns_once_and_recovers_once(self, monkeypatch, caplog):
+        offline = TransientError("Cannot reach GitHub: Failed to resolve 'api.github.com'")
+        records = self.run(monkeypatch, caplog, {"do": "check"}, [offline] * 4 + [None, None])
+        assert self.messages(records, "WARNING") == [
+            "Checking for updates failed: Cannot reach GitHub: Failed to resolve 'api.github.com'"
+        ]
+        assert not self.messages(records, "ERROR")
+        assert all(r.exc_info is None for r in records if r.levelno >= 30)  # expected: no traceback
+        again = [m for m in self.messages(records, "DEBUG") if m.startswith("Checking for updates failed again")]
+        assert len(again) == 3
+        assert self.messages(records, "INFO").count("Checking for updates works again") == 1
+
+    def test_failed_check_waits_the_usual_interval(self, monkeypatch, caplog):
+        """A failed check is retried at the next check, as before (not after the main loop's 60 s)."""
+        slept = []
+
+        def sleep(s):
+            slept.append(s)
+            if len(slept) >= 2:
+                daemon._shutdown_requested = True
+
+        def offline(cfg):
+            raise TransientError("Cannot reach GitHub: down")
+
+        monkeypatch.setattr(daemon, "sleep_interruptible", sleep)
+        monkeypatch.setattr(daemon.time, "sleep", lambda s: pytest.fail("main loop error path taken"))
+        monkeypatch.setattr(daemon, "check_for_updates", offline)
+        daemon.main_loop({"do": "check", "check_interval": 900})
+        assert slept == [900, 900]
+
+    def test_missing_repository_is_one_error(self, monkeypatch, caplog):
+        missing = ConfigurationError("Repository not found: trackIT-Systems/nope")
+        records = self.run(monkeypatch, caplog, {"do": "check"}, [missing] * 3)
+        assert self.messages(records, "ERROR") == ["Checking for updates failed: Repository not found: trackIT-Systems/nope"]
+        assert all(r.exc_info is None for r in records if r.levelno >= 30)
+        assert not self.messages(records, "WARNING")
+
+    def test_switch_from_transient_to_configuration_error_is_logged(self, monkeypatch, caplog):
+        offline = TransientError("Cannot reach GitHub: down")
+        missing = ConfigurationError("Repository not found: trackIT-Systems/nope")
+        records = self.run(monkeypatch, caplog, {"do": "check"}, [offline, offline, missing, missing, offline])
+        assert [(r.levelname, r.getMessage()) for r in records if r.levelno >= 30] == [
+            ("WARNING", "Checking for updates failed: Cannot reach GitHub: down"),
+            ("ERROR", "Checking for updates failed: Repository not found: trackIT-Systems/nope"),
+            ("WARNING", "Checking for updates failed: Cannot reach GitHub: down"),
+        ]
+        assert "Checking for updates works again" not in self.messages(records, "INFO")
+
+    def test_pending_update_is_not_reannounced_after_a_failed_check(self, monkeypatch, caplog):
+        offline = TransientError("Cannot reach GitHub: down")
+        records = self.run(monkeypatch, caplog, {"do": "check"}, ["https://u", offline, "https://u"])
+        assert len([m for m in self.messages(records, "INFO") if m.startswith("Update found")]) == 1
+
+    def test_failed_download_is_logged_once_and_retried(self, monkeypatch, caplog):
+        calls = []
+
+        def download(url, cfg):
+            calls.append(url)
+            if len(calls) <= 3:
+                raise TransientError("Download of https://u interrupted at 5 of 10 bytes")
+            return Path("/data/u.tar")
+
+        monkeypatch.setattr(daemon, "download_update", download)
+        records = self.run(monkeypatch, caplog, {"do": "download"}, ["https://u"] * 4)
+        assert len(calls) == 4
+        assert self.messages(records, "WARNING") == [
+            "Downloading the update failed: Download of https://u interrupted at 5 of 10 bytes"
+        ]
+        assert self.messages(records, "INFO").count("Downloading the update works again") == 1
+
+    def test_a_download_failure_ends_with_the_next_successful_apply(self, monkeypatch, caplog):
+        # download mode fails; then the window opens and the apply workflow downloads fine
+        modes = iter(["download", "apply", "download"])
+        monkeypatch.setattr(daemon, "get_current_behavior", lambda config, entry, in_window: (60, next(modes)))
+        monkeypatch.setattr(daemon, "download_update", lambda url, cfg: (_ for _ in ()).throw(TransientError("offline")))
+        with patch.object(daemon, "apply_update_workflow", return_value=False):
+            records = self.run(monkeypatch, caplog, {"do": "download"}, ["https://u"] * 3)
+        # the second download failure is a new one, logged at WARNING again
+        assert self.messages(records, "WARNING") == ["Downloading the update failed: offline"] * 2
+        assert self.messages(records, "INFO").count("Downloading the update works again") == 1
+
+    def test_failed_apply_is_logged_once_and_retried(self, monkeypatch, caplog):
+        error = UpdateError("Rsync failed with exit code 23: Partial transfer", exit_code=23)
+        with patch.object(daemon, "apply_update_workflow", side_effect=error) as wf:
+            records = self.run(monkeypatch, caplog, {"do": "apply"}, ["https://u"] * 3)
+        assert wf.call_count == 3
+        assert self.messages(records, "ERROR") == [
+            "Applying the update failed: Rsync failed with exit code 23: Partial transfer"
+        ]
+        assert all(r.exc_info is None for r in records if r.levelno >= 30)
+
+    def test_unexpected_error_outside_the_stages_retries_after_60s(self, monkeypatch, caplog):
+        monkeypatch.setattr(daemon, "get_current_behavior", lambda *a: (_ for _ in ()).throw(RuntimeError("bug")))
+        sleeps = []
+
+        def sleep(s):
+            sleeps.append(s)
+            if len(sleeps) >= 2:
+                daemon._shutdown_requested = True
+
+        monkeypatch.setattr(daemon.time, "sleep", sleep)
+        with caplog.at_level("DEBUG", logger="tsupdate"):
+            daemon.main_loop({"do": "check"})
+        assert sleeps == [60, 60]
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert [r.getMessage() for r in errors] == ["Main loop failed: RuntimeError: bug"]
+        assert errors[0].exc_info is not None
+
+    def test_invalid_maintenance_window_is_logged_once(self, monkeypatch, caplog):
+        """Evaluated as outside the window and with check_interval as delay, as before; one ERROR."""
+        bad = ConfigurationError("Cannot evaluate the maintenance window (02:00 - 3:OO): bad time")
+
+        def raise_bad(entry):
+            raise bad
+
+        cfg = {"do": "check", "check_interval": 900, "maintenance_do": "apply"}
+        slept = []
+        checks = []
+
+        def sleep(s):
+            slept.append(s)
+            if len(slept) >= 3:
+                daemon._shutdown_requested = True
+
+        monkeypatch.setattr(daemon, "sleep_interruptible", sleep)
+        monkeypatch.setattr(daemon.time, "sleep", lambda s: pytest.fail("main loop error path taken"))
+        monkeypatch.setattr(daemon, "check_for_updates", lambda c: checks.append(c) or None)
+        monkeypatch.setattr(daemon, "is_in_maintenance_window", raise_bad)
+        monkeypatch.setattr(daemon, "get_next_maintenance_window_start", raise_bad)
+        with caplog.at_level("DEBUG", logger="tsupdate"):
+            daemon.main_loop(cfg, maintenance_entry=MAINTENANCE_ENTRY)
+        records = [r for r in caplog.records if r.name == "tsupdate.daemon"]
+        assert slept == [900, 900, 900]
+        assert len(checks) == 3  # still checked, in mode "check" (outside the window)
+        assert self.messages(records, "ERROR") == [
+            "Evaluating the maintenance window failed: Cannot evaluate the maintenance window (02:00 - 3:OO): bad time"
+        ]
+        assert not self.messages(records, "WARNING")
+
+    def test_next_window_fallback_and_recovery(self, monkeypatch, caplog):
+        """next_check_delay() raising falls back to check_interval; logged once, recovery once."""
+        results = [ConfigurationError("Cannot determine when the maintenance window (02:00 - 02:30) starts")] * 2
+
+        def next_start(entry):
+            if results:
+                raise results.pop(0)
+            return datetime.now(UTC) + timedelta(days=1)
+
+        slept = []
+
+        def sleep(s):
+            slept.append(s)
+            if len(slept) >= 3:
+                daemon._shutdown_requested = True
+
+        monkeypatch.setattr(daemon, "sleep_interruptible", sleep)
+        monkeypatch.setattr(daemon, "check_for_updates", lambda c: None)
+        monkeypatch.setattr(daemon, "is_in_maintenance_window", lambda e: False)
+        monkeypatch.setattr(daemon, "get_next_maintenance_window_start", next_start)
+        with caplog.at_level("DEBUG", logger="tsupdate"):
+            daemon.main_loop({"do": "check", "check_interval": 900}, maintenance_entry=MAINTENANCE_ENTRY)
+        records = [r for r in caplog.records if r.name == "tsupdate.daemon"]
+        assert slept == [900, 900, 900]
+        assert len(self.messages(records, "ERROR")) == 1
+        assert self.messages(records, "INFO").count("Evaluating the maintenance window works again") == 1
 
     def test_pending_update_is_logged_once(self, monkeypatch, caplog):
         updates = ["https://u1", "https://u1", "https://u1", "https://u2"]
@@ -447,9 +641,7 @@ class TestNextCheckDelay:
 
     def delay(self, monkeypatch, until, mode="check", in_window=False, entry=ENTRY, interval=3600):
         monkeypatch.setattr(
-            daemon,
-            "get_next_maintenance_window_start",
-            lambda e: None if until is None else datetime.now() + timedelta(seconds=until),
+            daemon, "get_next_maintenance_window_start", lambda e: datetime.now() + timedelta(seconds=until)
         )
         return daemon.next_check_delay(interval, mode, entry, in_window)
 
@@ -466,9 +658,18 @@ class TestNextCheckDelay:
     def test_nothing_mode_sleeps_until_window(self, monkeypatch):
         assert self.delay(monkeypatch, 36000, mode="nothing") == pytest.approx(36001, abs=2)
 
-    @pytest.mark.parametrize("until", [None, -5, 0])
-    def test_unknown_or_past_start_uses_interval(self, monkeypatch, until):
-        assert self.delay(monkeypatch, until) == 3600
+    @pytest.mark.parametrize("until", [-5, 0])
+    def test_past_start_is_an_error(self, monkeypatch, until):
+        with pytest.raises(UpdateError, match=r"Next start of the maintenance window \(02:00 - 02:30\) is in the past"):
+            self.delay(monkeypatch, until)
+
+    def test_unknown_start_is_a_configuration_error(self, monkeypatch):
+        def fail(entry):
+            raise ConfigurationError("Cannot evaluate the maintenance window (02:00 - 3:OO): bad time")
+
+        monkeypatch.setattr(daemon, "get_next_maintenance_window_start", fail)
+        with pytest.raises(ConfigurationError):
+            daemon.next_check_delay(3600, "check", self.ENTRY, False)
 
 
 class TestFailedUpdateDoesNotLoop:
@@ -518,8 +719,12 @@ class TestFailedUpdateDoesNotLoop:
         assert seen == [1]
 
     def test_attempt_discarded_when_tryboot_could_not_be_configured(self, monkeypatch, reboots, tmp_path):
-        monkeypatch.setattr(daemon, "execute_tryboot", lambda **kw: 1)
-        assert not daemon.sync_and_apply_update(tmp_path / "u.tar", self.CFG, "https://u")
+        def fail(**kw):
+            raise UpdateError("config.txt does not exist")
+
+        monkeypatch.setattr(daemon, "execute_tryboot", fail)
+        with pytest.raises(UpdateError):
+            daemon.sync_and_apply_update(tmp_path / "u.tar", self.CFG, "https://u")
         assert update_state._load() == {}
 
 

@@ -134,6 +134,10 @@ sudo tsupdate rollback
 
 ## Error Handling
 
+`execute_apply()` returns 0 on success and raises `UpdateError` on failure; the CLI prints the message and
+exits with the error's exit code (see the README). A failed rsync keeps rsync's exit code, a timed-out rsync
+raises an `UpdateError` with exit code 124. It is not a `TransientError`: a sync that exceeds the limit does so again at every attempt until the limit is raised, so the daemon logs it at ERROR.
+
 ### Common Rsync Exit Codes
 
 - **0** - Success

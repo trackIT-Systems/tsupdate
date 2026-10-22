@@ -35,6 +35,10 @@ This module handles mounting/unmounting partitions and syncing filesystems betwe
 
 **`execute_unmount()`**: Unmount inactive partition from `ROOT_UP`.
 
+The functions do not log failures; they raise `UpdateError` (a timed-out rsync: `TransientError` with exit
+code 124), which the CLI or the daemon's main loop reports. The command functions return 0 on success.
+`mount_context()` logs a failed unmount as a warning only.
+
 ## Sync Behavior
 
 The sync operation uses rsync with the following options:

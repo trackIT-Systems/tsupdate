@@ -131,6 +131,19 @@ sudo tsupdate mount                            # mount the inactive partition at
 sudo tsupdate unmount
 ```
 
+### Exit codes
+
+A failed command prints its error to stderr (`ERROR: ...`, no traceback) and exits with:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success. For `check` also when no image or update was found |
+| 1 | The operation failed, e.g. a corrupt archive, a version mismatch, a mount failure |
+| 75 | Temporary failure, retrying later may work: no network, DNS failure, timeout, GitHub 5xx or rate limit, interrupted download (`EX_TEMPFAIL`) |
+| 78 | Needs a human: repository, release or asset not found, access denied, update source not allowed, file not found (`EX_CONFIG`) |
+| 124 | rsync ran into `--rsync-timeout` |
+| other | `apply`: rsync's own exit code, e.g. 23 for a partial transfer |
+
 ## Typical workflows
 
 **Incremental update**

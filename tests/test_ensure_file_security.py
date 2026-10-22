@@ -17,6 +17,7 @@ from unittest.mock import patch
 import pytest
 
 from tsupdate import utils
+from tsupdate.errors import ConfigurationError
 from tsupdate.github import ALLOWED_OWNER
 from tsupdate.utils import _sha256_file, _verify_file, is_allowed_source_url
 
@@ -104,15 +105,19 @@ class TestVerifyFile:
 
 class TestEnsureFileRejectsDisallowedSources:
     def test_non_github_source_rejected_outright(self, tmp_path):
-        result = utils.ensure_file("https://evil.example/malicious.tar", artifacts_path=tmp_path)
-        assert result == (None, False)
+        with pytest.raises(ConfigurationError, match="Refusing update source"):
+            utils.ensure_file("https://evil.example/malicious.tar", artifacts_path=tmp_path)
         # No artifact should have been written for a rejected source.
         assert list(tmp_path.iterdir()) == []
 
     def test_wrong_org_source_rejected_outright(self, tmp_path):
         url = "https://github.com/some-other-org/repo/releases/download/v1/a.tar"
-        result = utils.ensure_file(url, artifacts_path=tmp_path)
-        assert result == (None, False)
+        with pytest.raises(ConfigurationError, match="Refusing update source"):
+            utils.ensure_file(url, artifacts_path=tmp_path)
+
+    def test_missing_local_file_is_named_as_such(self, tmp_path):
+        with pytest.raises(ConfigurationError, match="File not found: /nonexistent/update.tar"):
+            utils.ensure_file("/nonexistent/update.tar", artifacts_path=tmp_path)
 
 
 class TestEnsureFileCacheBypassFix:
@@ -131,7 +136,6 @@ class TestEnsureFileCacheBypassFix:
 
         def fake_download(url, output_path, expected_size=None, expected_digest=None):
             output_path.write_bytes(good_content)
-            return True
 
         with patch.object(
             utils,
@@ -193,7 +197,7 @@ class TestEnsureFileCacheBypassFix:
                 utils,
                 "resolve_github_release_asset",
                 return_value={"url": "https://objects.githubusercontent.com/x", "size": None, "digest": None},
-            ) as mock_resolve, patch.object(utils, "download_file", return_value=False) as mock_dl:
+            ) as mock_resolve, patch.object(utils, "download_file") as mock_dl:
                 utils.ensure_file(
                     f"https://github.com/{ALLOWED_OWNER}/tsOS-base/releases/download/v1/../../outside-marker-dir/pwned",
                     artifacts_path=tmp_path,

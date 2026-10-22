@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from tsupdate import apply
+from tsupdate.errors import TransientError, UpdateError
 
 BATCH_NAME = "tsOS-base-arm64-update-2025.12.3-to-2025.12.4"
 
@@ -62,11 +63,14 @@ class TestBatchSh:
     def test_extract_rsync_command_without_rsync_line(self, tmp_path):
         p = tmp_path / "batch.sh"
         p.write_text('BASE_PRETTY_NAME="x"\n')
-        assert apply.extract_rsync_command_from_batch_sh(p) is None
+        with pytest.raises(UpdateError, match="Could not find rsync command in batch.sh"):
+            apply.extract_rsync_command_from_batch_sh(p)
 
     def test_missing_batch_sh(self, tmp_path):
-        assert apply.parse_batch_metadata(tmp_path / "batch.sh") is None
-        assert apply.extract_rsync_command_from_batch_sh(tmp_path / "batch.sh") is None
+        with pytest.raises(UpdateError, match="batch.sh not found"):
+            apply.parse_batch_metadata(tmp_path / "batch.sh")
+        with pytest.raises(UpdateError, match="batch.sh not found"):
+            apply.extract_rsync_command_from_batch_sh(tmp_path / "batch.sh")
 
 
 @pytest.fixture(autouse=True)
@@ -87,13 +91,15 @@ class TestArchive:
         assert apply.find_rsync_batch_file(extracted, "renamed.tar") == extracted / BATCH_NAME
 
     def test_extract_missing_file(self, tmp_path, extract_dir):
-        assert apply.extract_update_archive(tmp_path / "nope.tar") is None
+        with pytest.raises(UpdateError, match="Update file does not exist"):
+            apply.extract_update_archive(tmp_path / "nope.tar")
         assert not extract_dir.exists()
 
     def test_corrupt_archive_does_not_leak_extract_dir(self, tmp_path, extract_dir):
         bad = tmp_path / "bad.tar"
         bad.write_bytes(b"this is not a tar archive")
-        assert apply.extract_update_archive(bad) is None
+        with pytest.raises(UpdateError, match="Could not extract archive"):
+            apply.extract_update_archive(bad)
         assert not extract_dir.exists()
 
     def test_leftovers_are_wiped_before_extracting(self, tmp_path, extract_dir):
@@ -109,7 +115,8 @@ class TestArchive:
             data = b"x"
             info.size = len(data)
             tar.addfile(info, io.BytesIO(data))
-        assert apply.extract_update_archive(archive) is None
+        with pytest.raises(UpdateError, match="Could not extract archive"):
+            apply.extract_update_archive(archive)
         assert not (extract_dir.parent / "escaped.txt").exists()
         assert not extract_dir.exists()
 
@@ -152,17 +159,30 @@ class TestApplyRsyncBatch:
         assert run.call_args.kwargs["stdin"] is subprocess.DEVNULL
         assert run.call_args.kwargs["timeout"] == 3600.0
 
-    def test_timeout_maps_to_124(self, tmp_path):
+    def test_timeout_is_an_error_with_exit_code_124(self, tmp_path):
         batch = tmp_path / "batch"
         batch.write_bytes(b"x")
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("rsync", 5)):
-            assert apply.apply_rsync_batch(batch, tmp_path, ["-a"], None, 5) == 124
+        with (
+            patch("subprocess.run", side_effect=subprocess.TimeoutExpired("rsync", 5)),
+            pytest.raises(UpdateError, match=r"Rsync timed out \(limit was 5s\); increase rsync_timeout") as exc,
+        ):
+            apply.apply_rsync_batch(batch, tmp_path, ["-a"], None, 5)
+        assert exc.value.exit_code == 124
+        assert not isinstance(exc.value, TransientError)  # it repeats until the limit is raised
 
     def test_missing_batch_or_target(self, tmp_path):
-        assert apply.apply_rsync_batch(tmp_path / "missing", tmp_path, ["-a"]) == 1
+        with pytest.raises(UpdateError, match="Rsync batch file does not exist"):
+            apply.apply_rsync_batch(tmp_path / "missing", tmp_path, ["-a"])
         batch = tmp_path / "batch"
         batch.write_bytes(b"x")
-        assert apply.apply_rsync_batch(batch, tmp_path / "missing", ["-a"]) == 1
+        with pytest.raises(UpdateError, match="Target directory does not exist"):
+            apply.apply_rsync_batch(batch, tmp_path / "missing", ["-a"])
+
+    def test_rsync_not_installed(self, tmp_path):
+        batch = tmp_path / "batch"
+        batch.write_bytes(b"x")
+        with patch("subprocess.run", side_effect=FileNotFoundError), pytest.raises(UpdateError, match="not found: rsync"):
+            apply.apply_rsync_batch(batch, tmp_path, ["-a"])
 
     @pytest.mark.parametrize("code", [0, 1, 23, 124, 99])
     def test_exit_code_messages(self, code):
@@ -203,17 +223,31 @@ class TestExecuteApply:
 
     def test_version_mismatch_does_not_run_rsync(self, env):
         (env["target"] / "etc" / "os-release").write_text('PRETTY_NAME="tsOS base 2025.11.1"\n')
-        with patch("subprocess.run") as run:
-            assert apply.execute_apply(str(env["archive"])) == 1
+        with patch("subprocess.run") as run, pytest.raises(UpdateError, match="Version mismatch") as exc:
+            apply.execute_apply(str(env["archive"]))
+        assert exc.value.exit_code == 1
         run.assert_not_called()
 
     def test_rsync_failure_is_propagated(self, env):
-        with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 23)):
-            assert apply.execute_apply(str(env["archive"])) == 23
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 23)), pytest.raises(
+            UpdateError, match="Rsync failed with exit code 23: Partial transfer"
+        ) as exc:
+            apply.execute_apply(str(env["archive"]))
+        assert exc.value.exit_code == 23
 
     def test_refused_when_cannot_run(self, env, monkeypatch):
         monkeypatch.setattr(apply, "can_run_syncroot", lambda: False)
-        assert apply.execute_apply(str(env["archive"])) == 1
+        with pytest.raises(UpdateError, match="can only be run when booted regularly"):
+            apply.execute_apply(str(env["archive"]))
+        assert env["mounts"] == []
+
+    def test_download_failure_is_raised(self, env, monkeypatch):
+        def offline(source, artifacts):
+            raise TransientError("Cannot reach GitHub: down")
+
+        monkeypatch.setattr(apply, "ensure_file", offline)
+        with pytest.raises(TransientError, match="Cannot reach GitHub"):
+            apply.execute_apply("https://github.com/trackIT-Systems/x/releases/download/v/u.tar")
         assert env["mounts"] == []
 
 
@@ -257,7 +291,8 @@ class TestApplyCleanup:
 
     def test_download_kept_after_failure(self, downloaded):
         archive, _ = downloaded
-        assert self.run(rc=23) == 23
+        with pytest.raises(UpdateError):
+            self.run(rc=23)
         assert archive.exists()
 
     def test_local_file_is_never_deleted(self, downloaded):
