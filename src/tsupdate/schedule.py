@@ -26,7 +26,7 @@ def load_schedule(schedule_path: Path) -> Optional[dict]:
         Schedule dictionary if file exists and is valid, None otherwise
     """
     if not schedule_path.exists():
-        logger.debug(f"Schedule file not found: {schedule_path}")
+        logger.debug("Schedule file not found: %s", schedule_path)
         return None
     
     try:
@@ -34,21 +34,21 @@ def load_schedule(schedule_path: Path) -> Optional[dict]:
             schedule = yaml.safe_load(f)
         
         if schedule is None:
-            logger.warning(f"Schedule file is empty: {schedule_path}")
+            logger.warning("Schedule file is empty: %s", schedule_path)
             return None
         
         if not isinstance(schedule, dict):
-            logger.warning(f"Invalid schedule format in {schedule_path}: expected dictionary")
+            logger.warning("Invalid schedule format in %s: expected dictionary", schedule_path)
             return None
         
-        logger.debug(f"Loaded schedule from {schedule_path}")
+        logger.debug("Loaded schedule from %s", schedule_path)
         return schedule
         
     except yaml.YAMLError as e:
-        logger.warning(f"Failed to parse schedule YAML: {e}")
+        logger.warning("Failed to parse schedule YAML: %s", e)
         return None
     except (OSError, IOError) as e:
-        logger.warning(f"Failed to read schedule file: {e}")
+        logger.warning("Failed to read schedule file: %s", e)
         return None
 
 
@@ -125,14 +125,14 @@ def is_in_maintenance_window(maintenance_entry: dict) -> bool:
         in_window = schedule_entry.active()
         
         if in_window:
-            logger.info(f"Current time is within maintenance window ({start_str} - {stop_str})")
+            logger.debug("Current time is within maintenance window (%s - %s)", start_str, stop_str)
         else:
-            logger.info(f"Current time is outside maintenance window ({start_str} - {stop_str})")
+            logger.debug("Current time is outside maintenance window (%s - %s)", start_str, stop_str)
         
         return in_window
         
-    except Exception as e:
-        logger.error(f"Error checking maintenance window: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Error checking maintenance window")
         return False
 
 
@@ -179,13 +179,13 @@ def get_next_maintenance_window_start(maintenance_entry: dict) -> Optional[datet
         schedule_entry.next_stop()
         
         if next_start:
-            logger.debug(f"Next maintenance window starts at: {next_start}")
+            logger.debug("Next maintenance window starts at: %s", next_start)
             return next_start
         else:
             logger.warning("Could not determine next maintenance window start time")
             return None
         
-    except Exception as e:
-        logger.error(f"Error getting next maintenance window start: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Error getting next maintenance window start")
         return None
 

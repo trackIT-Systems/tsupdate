@@ -58,9 +58,9 @@ def mount_partition(device: str, mount_point: Path) -> bool:
     # Create mount point directory if it doesn't exist
     try:
         mount_point.mkdir(parents=True, exist_ok=True)
-        logger.debug(f"Created mount point directory: {mount_point}")
+        logger.debug("Created mount point directory: %s", mount_point)
     except OSError as e:
-        logger.error(f"Could not create mount point {mount_point}: {e}")
+        logger.error("Could not create mount point %s: %s", mount_point, e)
         return False
     
     # Mount the partition
@@ -71,13 +71,13 @@ def mount_partition(device: str, mount_point: Path) -> bool:
             text=True,
             check=True,
         )
-        logger.debug(f"Mounted {device} to {mount_point}")
+        logger.debug("Mounted %s to %s", device, mount_point)
         return True
     except subprocess.CalledProcessError as e:
-        logger.error(f"Could not mount {device} to {mount_point}: {e.stderr}")
+        logger.error("Could not mount %s to %s: %s", device, mount_point, e.stderr)
         return False
     except FileNotFoundError:
-        logger.error("mount command not found")
+        logger.error("Command not found: mount")
         return False
 
 
@@ -98,13 +98,13 @@ def unmount_partition(mount_point: Path) -> bool:
             text=True,
             check=True,
         )
-        logger.debug(f"Unmounted {mount_point}")
+        logger.debug("Unmounted %s", mount_point)
         return True
     except subprocess.CalledProcessError as e:
-        logger.error(f"Could not unmount {mount_point}: {e.stderr}")
+        logger.error("Could not unmount %s: %s", mount_point, e.stderr)
         return False
     except FileNotFoundError:
-        logger.error("umount command not found")
+        logger.error("Command not found: umount")
         return False
 
 
@@ -129,7 +129,7 @@ def mount_context(device: str, mount_point: Path):
         yield mount_point
     finally:
         if not unmount_partition(mount_point):
-            logger.warning(f"Could not unmount {mount_point}")
+            logger.warning("Could not unmount %s", mount_point)
 
 
 def sync_root_partitions(
@@ -159,7 +159,7 @@ def sync_root_partitions(
     source_str = str(source) + "/"
     destination_str = str(destination) + "/"
     
-    logger.debug(f"Syncing from {source_str} to {destination_str}")
+    logger.debug("Syncing from %s to %s", source_str, destination_str)
     
     # Build rsync command (--checksum: compare by content, not only size+mtime)
     rsync_cmd = ["rsync", "-a", "-h", "--stats", "--delete", "--checksum"]
@@ -183,16 +183,16 @@ def sync_root_partitions(
     except subprocess.TimeoutExpired:
         limit = f"{int(timeout)}s" if timeout is not None else "unlimited"
         logger.error(
-            "rsync timed out (limit was %s); increase rsync_timeout in tsupdate.yml "
+            "Rsync timed out (limit was %s); increase rsync_timeout in tsupdate.yml "
             "or pass --rsync-timeout (0 = no limit)",
             limit,
         )
         return False
     except subprocess.CalledProcessError as e:
-        logger.error(f"rsync failed: {e}")
+        logger.error("Rsync failed: %s", e)
         return False
     except FileNotFoundError:
-        logger.error("rsync command not found")
+        logger.error("Command not found: rsync")
         return False
 
 
@@ -208,7 +208,7 @@ def execute_syncroot(rsync_timeout_sec: Optional[int] = None) -> int:
     """
     # Check if syncroot can be run
     if not can_run_syncroot():
-        logger.error("syncroot can only be run when booted regularly or when tryboot is persisted.")
+        logger.error("The syncroot command can only be run when booted regularly or when tryboot is persisted")
         return 1
     
     # Get inactive partition device
@@ -221,14 +221,14 @@ def execute_syncroot(rsync_timeout_sec: Optional[int] = None) -> int:
     inactive = get_inactive_partition()
     if inactive:
         _, partition_num, label = inactive
-        logger.info(f"Inactive partition: {label} (p{partition_num})")
+        logger.info("Inactive partition: %s (p%s)", label, partition_num)
     
     # Mount inactive partition and sync
     try:
         with mount_context(device, ROOT_UP) as mount_point:
-            logger.info(f"Mounted {device} to {mount_point}")
+            logger.info("Mounted %s to %s", device, mount_point)
             
-            logger.info(f"Syncing {ROOT_RO} to {mount_point}...")
+            logger.info("Syncing %s to %s", ROOT_RO, mount_point)
             if not sync_root_partitions(rsync_timeout_sec=rsync_timeout_sec):
                 return 1
             
@@ -256,7 +256,7 @@ def execute_mount() -> int:
     inactive = get_inactive_partition()
     if inactive:
         _, partition_num, label = inactive
-        logger.info(f"Inactive partition: {label} (p{partition_num})")
+        logger.info("Inactive partition: %s (p%s)", label, partition_num)
     
     # Check if already mounted
     try:
@@ -265,7 +265,7 @@ def execute_mount() -> int:
             capture_output=True,
         )
         if result.returncode == 0:
-            logger.error(f"{ROOT_UP} is already mounted")
+            logger.error("%s is already mounted", ROOT_UP)
             return 1
     except FileNotFoundError:
         # mountpoint command not available, continue
@@ -276,7 +276,7 @@ def execute_mount() -> int:
     if not mount_partition(device, ROOT_UP):
         return 1
     
-    logger.info(f"Mounted {device} to {ROOT_UP}")
+    logger.info("Mounted %s to %s", device, ROOT_UP)
     return 0
 
 
@@ -294,7 +294,7 @@ def execute_unmount() -> int:
             capture_output=True,
         )
         if result.returncode != 0:
-            logger.error(f"{ROOT_UP} is not mounted")
+            logger.error("%s is not mounted", ROOT_UP)
             return 1
     except FileNotFoundError:
         # mountpoint command not available, continue
@@ -305,6 +305,6 @@ def execute_unmount() -> int:
     if not unmount_partition(ROOT_UP):
         return 1
     
-    logger.info(f"Unmounted {ROOT_UP}")
+    logger.info("Unmounted %s", ROOT_UP)
     return 0
 

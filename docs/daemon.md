@@ -394,38 +394,27 @@ sudo kill -INT $PID
 
 ## Logging
 
-The daemon logs to stdout/stderr, which is captured by systemd journal.
+Under systemd the daemon logs to the journal (`journalctl -u tsupdated`), with the syslog priority of each message. It follows the tsOS logging convention: at the default level, WARNING, a station that works logs nothing. A state that repeats on every check is logged once, when it changes.
 
 ### Log Levels
 
-**INFO**: Normal operation messages
-- "Checking for updates..."
-- "Update found: ..."
+**ERROR**: an operation failed and needs attention
+- "Failed to sync root partition - aborting update"
+- "Failed to apply update - aborting"
+- "Error in main loop, continuing operation: ..." (once when the error starts or changes; "Main loop works again" at INFO once it recovers)
+
+**WARNING**: something unexpected that was handled
+- "Configuration file not found, using default configuration: ..."
+- "Not applying ...: it was already attempted ... times ..." (once per update)
+
+**INFO** (not shown at the default level): one-off events
+- "Update found (mode: check), deferring update until the next check: ..." (once per update, not on every check)
+- "Entering maintenance window (...)" / "Leaving maintenance window (...)"
 - "Update applied successfully"
 
-**WARNING**: Non-critical issues
-- "Configuration file not found"
-- "wall command not available"
-
-**ERROR**: Critical issues that prevent operations
-- "Failed to sync root partition"
-- "Failed to apply update"
-
-**DEBUG**: Detailed operation info (enabled with `--verbose`)
-- Configuration details
-- GitHub API calls
-- File operations
-
-### Structured Logging
-
-Messages follow a consistent format:
-
-```
-2025-12-23 14:30:00 - INFO: Checking for updates...
-2025-12-23 14:30:05 - INFO: ✓ Update available: https://github.com/.../update.tar
-2025-12-23 14:30:10 - INFO: Preparing inactive partition...
-2025-12-23 14:35:00 - INFO: ✓ Update applied successfully
-```
+**DEBUG** (enabled with `--verbose`): everything repeated or detailed
+- "Checking for updates", "No updates available", "Next update check in ... seconds"
+- Configuration details, GitHub API calls, file operations
 
 ## Security Considerations
 

@@ -1,11 +1,14 @@
 """Command-line entry point for tsupdated daemon."""
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
 from tsupdate import __version__
 from tsupdate.daemon import run_daemon
+
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
@@ -58,10 +61,10 @@ def main() -> None:
     try:
         run_daemon(config_path=args.config, schedule_path=args.schedule, verbose=args.verbose)
     except KeyboardInterrupt:
-        print("\nInterrupted by keyboard", file=sys.stderr)
+        logger.info("Interrupted by keyboard")
         sys.exit(0)
     except Exception as e:
-        print(f"Fatal error: {e}", file=sys.stderr)
+        logger.critical("Fatal error: %s", e, exc_info=True)
         sys.exit(1)
 
 

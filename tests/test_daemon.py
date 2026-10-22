@@ -1,6 +1,6 @@
 """Tests for the tsupdated daemon: config loading, behaviour selection, persist and the update workflow."""
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -173,10 +173,11 @@ class TestTrybootPersist:
         # a fractional uptime, as read from /proc/uptime: never an exact multiple of anything
         monkeypatch.setattr(daemon, "get_system_uptime", lambda: 12.34)
         monkeypatch.setattr(daemon.time, "sleep", lambda s: None)
-        with patch.object(daemon, "persist_boot_configuration", return_value=True), caplog.at_level("INFO"):
+        with patch.object(daemon, "persist_boot_configuration", return_value=True), caplog.at_level("DEBUG"):
             daemon.handle_tryboot_persist(312)  # waits 299.66s
-        progress = [r.message for r in caplog.records if "Persisting tryboot configuration in" in r.message]
+        progress = [r for r in caplog.records if "Persisting tryboot configuration in" in r.message]
         assert len(progress) == 4  # after ~60s, 120s, 180s and 240s
+        assert all(r.levelname == "DEBUG" for r in progress)
 
     def test_returns_whether_the_boot_config_is_settled(self, booted_from, monkeypatch):
         booted_from(3, tryboot_active=True)
@@ -320,6 +321,125 @@ class TestMainLoop:
         daemon.main_loop(cfg, maintenance_entry={"name": "maintenance"})
         # There must be a check at (or shortly after) the window start at t=600s.
         assert any(600 <= t <= 660 for t in checks), checks
+
+
+MAINTENANCE_ENTRY = {"name": "maintenance", "start": "02:00", "stop": "02:30"}
+
+
+class TestMainLoopLogging:
+    """A state that repeats on every iteration is logged once, when it changes."""
+
+    def run(self, monkeypatch, caplog, config, results, in_window=None, maintenance_entry=None):
+        """
+        Run one main_loop iteration per entry of `results`: an exception is raised by the update
+        check, anything else is returned as the found update URL. Returns the log records.
+        """
+        results = list(results)
+        windows = list(in_window or [False] * len(results))
+        iterations = len(results)
+        sleeps = []
+
+        def sleep(s):
+            sleeps.append(s)
+            if len(sleeps) >= iterations:
+                daemon._shutdown_requested = True
+
+        def check(cfg):
+            result = results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        # one sleep per iteration: until the next check, or 60 s after an error
+        monkeypatch.setattr(daemon, "sleep_interruptible", sleep)
+        monkeypatch.setattr(daemon.time, "sleep", sleep)
+        monkeypatch.setattr(daemon, "check_for_updates", check)
+        monkeypatch.setattr(daemon, "is_in_maintenance_window", lambda e: windows.pop(0))
+        monkeypatch.setattr(
+            daemon, "get_next_maintenance_window_start", lambda e: datetime.now(UTC) + timedelta(days=1)
+        )
+        with caplog.at_level("DEBUG", logger="tsupdate"):
+            daemon.main_loop(config, maintenance_entry=maintenance_entry)
+        return [r for r in caplog.records if r.name == "tsupdate.daemon"]
+
+    @staticmethod
+    def messages(records, level):
+        return [r.getMessage() for r in records if r.levelname == level]
+
+    def test_repeated_error_is_logged_once_and_its_recovery_once(self, monkeypatch, caplog):
+        boom = RuntimeError("GitHub unreachable")
+        records = self.run(monkeypatch, caplog, {"do": "check"}, [boom, boom, boom, None, None])
+        assert self.messages(records, "ERROR") == [
+            "Error in main loop, continuing operation: RuntimeError: GitHub unreachable"
+        ]
+        error = next(r for r in records if r.levelname == "ERROR")
+        assert error.exc_info is not None
+        again = [r for r in records if r.getMessage().startswith("Error in main loop again")]
+        assert len(again) == 2
+        assert all(r.levelname == "DEBUG" for r in again)
+        assert self.messages(records, "INFO").count("Main loop works again") == 1
+
+    def test_changed_error_is_logged_again(self, monkeypatch, caplog):
+        errors = [RuntimeError("a"), RuntimeError("b"), RuntimeError("b")]
+        records = self.run(monkeypatch, caplog, {"do": "check"}, errors)
+        assert self.messages(records, "ERROR") == [
+            "Error in main loop, continuing operation: RuntimeError: a",
+            "Error in main loop, continuing operation: RuntimeError: b",
+        ]
+        assert "Main loop works again" not in self.messages(records, "INFO")
+
+    def test_pending_update_is_logged_once(self, monkeypatch, caplog):
+        updates = ["https://u1", "https://u1", "https://u1", "https://u2"]
+        records = self.run(monkeypatch, caplog, {"do": "check"}, updates)
+        found = [m for m in self.messages(records, "INFO") if m.startswith("Update found")]
+        assert found == [
+            "Update found (mode: check), deferring update until the next check: https://u1",
+            "Update found (mode: check), deferring update until the next check: https://u2",
+        ]
+        assert len([m for m in self.messages(records, "DEBUG") if m.startswith("Update found")]) == 2
+
+    def test_update_found_again_after_it_disappeared(self, monkeypatch, caplog):
+        records = self.run(monkeypatch, caplog, {"do": "check"}, ["https://u", None, "https://u"])
+        assert len([m for m in self.messages(records, "INFO") if m.startswith("Update found")]) == 2
+
+    def test_pending_downloaded_update_is_logged_once(self, monkeypatch, caplog):
+        monkeypatch.setattr(daemon, "download_update", lambda url, cfg: Path("/data/u.tar"))
+        records = self.run(monkeypatch, caplog, {"do": "download"}, ["https://u"] * 3)
+        info = [m for m in self.messages(records, "INFO") if m.startswith("Update")]
+        assert len(info) == 2  # found, downloaded
+        assert info[1].startswith("Update downloaded successfully to /data/u.tar")
+
+    def test_blocked_update_is_warned_about_once(self, monkeypatch, caplog):
+        monkeypatch.setattr(update_state, "is_blocked", lambda url, version: True)
+        with patch.object(daemon, "apply_update_workflow") as wf:
+            records = self.run(monkeypatch, caplog, {"do": "apply"}, ["https://u"] * 3)
+        wf.assert_not_called()
+        assert len([m for m in self.messages(records, "WARNING") if m.startswith("Not applying https://u")]) == 1
+
+    def test_maintenance_window_is_logged_on_transitions_only(self, monkeypatch, caplog):
+        cfg = {"do": "check", "maintenance_do": "check"}
+        windows = [False, False, True, True, False, False]
+        records = self.run(monkeypatch, caplog, cfg, [None] * 6, in_window=windows, maintenance_entry=MAINTENANCE_ENTRY)
+        assert [m for m in self.messages(records, "INFO") if "maintenance window" in m] == [
+            "Starting outside the maintenance window (02:00 - 02:30)",
+            "Entering maintenance window (02:00 - 02:30)",
+            "Leaving maintenance window (02:00 - 02:30)",
+        ]
+
+    def test_nothing_mode_inside_window_is_warned_about_once_per_window(self, monkeypatch, caplog):
+        cfg = {"do": "nothing", "maintenance_do": "nothing"}
+        windows = [True, True, False, True]
+        records = self.run(monkeypatch, caplog, cfg, [None] * 4, in_window=windows, maintenance_entry=MAINTENANCE_ENTRY)
+        assert len(self.messages(records, "WARNING")) == 2
+
+    def test_quiet_in_normal_operation(self, monkeypatch, caplog):
+        records = self.run(monkeypatch, caplog, {"do": "check"}, [None] * 5)
+        assert self.messages(records, "INFO") == [
+            "Entering main update check loop",
+            "No maintenance schedule configured - check_interval=3600s, do=check",
+            "Shutdown requested - exiting main loop",
+        ]
+        assert not [r for r in records if r.levelno >= 30]
 
 
 class TestNextCheckDelay:

@@ -39,14 +39,14 @@ def find_largest_img_in_zip(zip_path: Path) -> Optional[str]:
         Name of largest .img file, or None if not found
     """
     try:
-        logger.debug(f"Scanning zip archive for .img files: {zip_path}")
+        logger.debug("Scanning zip archive for .img files: %s", zip_path)
         with zipfile.ZipFile(zip_path, "r") as zip_file:
             img_files = []
             for info in zip_file.infolist():
                 filename = info.filename
                 if filename.lower().endswith(".img"):
                     img_files.append((filename, info.file_size))
-                    logger.debug(f"Found .img file: {filename} ({info.file_size} bytes)")
+                    logger.debug("Found .img file: %s (%s bytes)", filename, info.file_size)
             
             if not img_files:
                 logger.error("No .img files found in zip archive")
@@ -55,13 +55,13 @@ def find_largest_img_in_zip(zip_path: Path) -> Optional[str]:
             # Find largest .img file
             largest_img = max(img_files, key=lambda x: x[1])
             img_name, img_size = largest_img
-            logger.info(f"Using largest .img file: {img_name} ({img_size} bytes)")
+            logger.info("Using largest .img file: %s (%s bytes)", img_name, img_size)
             return img_name
     except zipfile.BadZipFile as e:
-        logger.error(f"Invalid zip file: {e}")
+        logger.error("Invalid zip file: %s", e)
         return None
     except Exception as e:
-        logger.error(f"Failed to scan zip archive: {e}")
+        logger.error("Failed to scan zip archive: %s", e)
         return None
 
 
@@ -82,7 +82,7 @@ def extract_image(compressed_path: Path, output_path: Path) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    logger.info(f"Extracting image from {compressed_path}...")
+    logger.info("Extracting image from %s", compressed_path)
     
     # Chunk size for streaming (8MB chunks)
     CHUNK_SIZE = 8 * 1024 * 1024
@@ -102,7 +102,7 @@ def extract_image(compressed_path: Path, output_path: Path) -> bool:
             
             # Extract the largest .img file using streaming to temporary file
             with zipfile.ZipFile(compressed_path, "r") as zip_file:
-                logger.debug(f"Extracting {img_name} from zip archive (streaming)")
+                logger.debug("Extracting %s from zip archive (streaming)", img_name)
                 with zip_file.open(img_name) as source:
                     with open(temp_path, "wb") as target:
                         while True:
@@ -113,7 +113,7 @@ def extract_image(compressed_path: Path, output_path: Path) -> bool:
             
             # Rename temporary file to final path (atomic operation)
             temp_path.rename(output_path)
-            logger.info(f"Extracted {img_name} from zip to {output_path}")
+            logger.info("Extracted %s from zip to %s", img_name, output_path)
             return True
         elif compressed_path.suffix == ".gz" or compressed_path.suffixes[-1] == ".gz":
             logger.debug("Extracting gzip image (streaming)")
@@ -127,7 +127,7 @@ def extract_image(compressed_path: Path, output_path: Path) -> bool:
             
             # Rename temporary file to final path (atomic operation)
             temp_path.rename(output_path)
-            logger.info(f"Extracted gzip image to {output_path}")
+            logger.info("Extracted gzip image to %s", output_path)
             return True
         elif compressed_path.suffix == ".xz" or compressed_path.suffixes[-1] == ".xz":
             logger.debug("Extracting xz image (streaming)")
@@ -141,10 +141,10 @@ def extract_image(compressed_path: Path, output_path: Path) -> bool:
             
             # Rename temporary file to final path (atomic operation)
             temp_path.rename(output_path)
-            logger.info(f"Extracted xz image to {output_path}")
+            logger.info("Extracted xz image to %s", output_path)
             return True
         else:
-            logger.warning(f"Unknown compression format, assuming uncompressed")
+            logger.warning("Unknown compression format, assuming uncompressed")
             # Copy file as-is using shutil.copyfileobj for streaming to temporary file
             with open(compressed_path, "rb") as f_in:
                 with open(temp_path, "wb") as f_out:
@@ -152,10 +152,10 @@ def extract_image(compressed_path: Path, output_path: Path) -> bool:
             
             # Rename temporary file to final path (atomic operation)
             temp_path.rename(output_path)
-            logger.info(f"Copied image to {output_path}")
+            logger.info("Copied image to %s", output_path)
             return True
     except Exception as e:
-        logger.error(f"Failed to extract image: {e}")
+        logger.error("Failed to extract image: %s", e)
         # Clean up temporary file on failure
         safe_cleanup(temp_path)
         return False
@@ -172,7 +172,7 @@ def setup_loopback(image_path: Path) -> Optional[str]:
         Loopback device path (e.g., '/dev/loop0') or None on error
     """
     try:
-        logger.debug(f"Setting up loopback device for {image_path}")
+        logger.debug("Setting up loopback device for %s", image_path)
         # --partscan makes the kernel create the partition devices (/dev/loopNpM) itself;
         # relying on partprobe alone fails where it is not installed.
         result = subprocess.run(
@@ -182,7 +182,7 @@ def setup_loopback(image_path: Path) -> Optional[str]:
             check=True,
         )
         loop_device = result.stdout.strip()
-        logger.info(f"Created loopback device: {loop_device}")
+        logger.info("Created loopback device: %s", loop_device)
         
         # Re-scan as a fallback for losetup versions that ignore --partscan
         try:
@@ -192,16 +192,16 @@ def setup_loopback(image_path: Path) -> Optional[str]:
                 text=True,
                 check=False,  # Don't fail if partprobe is not available
             )
-            logger.debug(f"Scanned partitions on {loop_device}")
+            logger.debug("Scanned partitions on %s", loop_device)
         except FileNotFoundError:
             logger.debug("partprobe not available, partitions should still be accessible")
         
         return loop_device
     except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to setup loopback device: {e.stderr}")
+        logger.error("Failed to setup loopback device: %s", e.stderr)
         return None
     except FileNotFoundError:
-        logger.error("losetup command not found")
+        logger.error("Command not found: losetup")
         return None
 
 
@@ -216,20 +216,20 @@ def remove_loopback(loop_device: str) -> bool:
         True if successful, False otherwise
     """
     try:
-        logger.debug(f"Removing loopback device: {loop_device}")
+        logger.debug("Removing loopback device: %s", loop_device)
         subprocess.run(
             ["losetup", "--detach", loop_device],
             capture_output=True,
             text=True,
             check=True,
         )
-        logger.debug(f"Removed loopback device: {loop_device}")
+        logger.debug("Removed loopback device: %s", loop_device)
         return True
     except subprocess.CalledProcessError as e:
-        logger.warning(f"Failed to remove loopback device {loop_device}: {e.stderr}")
+        logger.warning("Failed to remove loopback device %s: %s", loop_device, e.stderr)
         return False
     except FileNotFoundError:
-        logger.warning("losetup command not found")
+        logger.warning("Command not found: losetup")
         return False
 
 
@@ -276,7 +276,7 @@ def execute_restore(
     """
     # Check if restore can be run
     if not can_run_syncroot():
-        logger.error("restore can only be run when booted regularly or when tryboot is persisted.")
+        logger.error("The restore command can only be run when booted regularly or when tryboot is persisted")
         return 1
     
     # Get inactive partition device
@@ -290,7 +290,7 @@ def execute_restore(
     inactive = get_inactive_partition()
     if inactive:
         _, partition_num, label = inactive
-        logger.info(f"Inactive partition: {label} (p{partition_num})")
+        logger.info("Inactive partition: %s (p%s)", label, partition_num)
     
     # Use artifacts directory for downloaded/extracted images
     artifacts_path = ARTIFACTS_DIR
@@ -347,7 +347,7 @@ def execute_restore(
             if not extract_image(downloaded_path, extracted_path):
                 return 1
             image_path = extracted_path
-            logger.debug(f"Using extracted image: {image_path}")
+            logger.debug("Using extracted image: %s", image_path)
         
         # Setup loopback device
         loop_device = setup_loopback(image_path)
@@ -363,26 +363,29 @@ def execute_restore(
             if Path(partition_device).exists():
                 break
             if attempt < max_attempts - 1:
-                logger.debug(f"Waiting for partition device {partition_device} to become available...")
+                logger.debug("Waiting for partition device %s to become available", partition_device)
                 time.sleep(0.5)
         
         if not Path(partition_device).exists():
-            logger.error(f"Partition device {partition_device} does not exist")
-            logger.error("The image may not have the requested partition, or partition scanning failed")
+            logger.error(
+                "Partition device %s does not exist; the image may not have the requested partition, "
+                "or partition scanning failed",
+                partition_device,
+            )
             return 1
         
-        logger.info(f"Using partition {partition} from image: {partition_device}")
+        logger.info("Using partition %s from image: %s", partition, partition_device)
         
         # Mount image partition and inactive partition, then sync
         try:
             with mount_context(partition_device, IMAGE_MOUNT) as image_mount:
-                logger.info(f"Mounted {partition_device} to {image_mount}")
+                logger.info("Mounted %s to %s", partition_device, image_mount)
                 
                 with mount_context(device, ROOT_UP) as target_mount:
-                    logger.info(f"Mounted {device} to {target_mount}")
+                    logger.info("Mounted %s to %s", device, target_mount)
                     
                     # Sync from image to inactive partition
-                    logger.info(f"Syncing {image_mount} to {target_mount}...")
+                    logger.info("Syncing %s to %s", image_mount, target_mount)
                     
                     sync_success = sync_root_partitions(source=image_mount, destination=target_mount)
                     if sync_success:
@@ -407,6 +410,6 @@ def execute_restore(
         # Keep the download after a failure so a retry doesn't download it again; a file the
         # user passed in is never deleted.
         if success and downloaded_path is not None and not is_local_file and not keep_image:
-            logger.debug(f"Removing downloaded image {downloaded_path}")
+            logger.debug("Removing downloaded image %s", downloaded_path)
             safe_cleanup(downloaded_path)
 

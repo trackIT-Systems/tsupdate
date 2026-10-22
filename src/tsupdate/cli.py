@@ -72,13 +72,13 @@ def execute_check(include_prereleases: bool = False, max_releases: int = 5, gith
     # Get GitHub URL - use provided URL or fall back to SUPPORT_URL from os-release
     if github_url:
         support_url = github_url
-        logger.debug(f"Using provided GitHub URL: {support_url}")
+        logger.debug("Using provided GitHub URL: %s", support_url)
     else:
         support_url = os_release.get("SUPPORT_URL")
         if not support_url:
             logger.error("SUPPORT_URL not found in /etc/os-release and no GitHub URL provided")
             return 1
-        logger.debug(f"Using SUPPORT_URL from os-release: {support_url}")
+        logger.debug("Using SUPPORT_URL from os-release: %s", support_url)
     
     # Get VERSION_ID from os-release (needed for batch update matching)
     version_id = os_release.version_id
@@ -86,16 +86,16 @@ def execute_check(include_prereleases: bool = False, max_releases: int = 5, gith
         logger.error("VERSION_ID not found in /etc/os-release")
         return 1
     
-    logger.debug(f"VERSION_ID: {version_id}")
+    logger.debug("VERSION_ID: %s", version_id)
     
     # Parse GitHub repo URL
     repo_info = parse_github_repo_url(support_url)
     if not repo_info:
-        logger.error(f"Could not parse GitHub repository URL: {support_url}")
+        logger.error("Could not parse GitHub repository URL: %s", support_url)
         return 1
     
     owner, repo = repo_info
-    logger.debug(f"GitHub repository: {owner}/{repo}")
+    logger.debug("GitHub repository: %s/%s", owner, repo)
     
     # Fetch releases (only as many as are searched for a batch update)
     releases = fetch_releases(owner, repo, include_prereleases=include_prereleases, limit=max_releases)

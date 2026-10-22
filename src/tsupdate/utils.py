@@ -118,7 +118,7 @@ def safe_cleanup(path: Path) -> None:
     try:
         if path and path.exists():
             path.unlink()
-            logger.debug(f"Removed file: {path}")
+            logger.debug("Removed file: %s", path)
     except OSError:
         pass  # Ignore cleanup errors
 
@@ -145,9 +145,9 @@ def prune_artifacts(artifacts_path: Optional[Path] = None) -> int:
             entry.unlink()
             removed += 1
         except OSError as e:
-            logger.warning(f"Could not remove {entry}: {e}")
+            logger.warning("Could not remove %s: %s", entry, e)
     if removed:
-        logger.info(f"Removed {removed} file(s) from {artifacts_path}")
+        logger.info("Removed %s file(s) from %s", removed, artifacts_path)
     return removed
 
 
@@ -187,7 +187,7 @@ def _verify_file(path: Path, expected_size: Optional[int], expected_digest: Opti
             if actual_hex.lower() == expected_hex.lower():
                 return True, "sha256 digest matches"
             return False, f"sha256 digest mismatch (expected {expected_hex}, got {actual_hex})"
-        logger.debug(f"Unsupported digest algorithm '{algo}', falling back to size check")
+        logger.debug("Unsupported digest algorithm '%s', falling back to size check", algo)
 
     if expected_size is not None:
         if actual_size == expected_size:
@@ -232,7 +232,7 @@ def download_file(
     if temp_path.exists() and temp_path.is_file():
         resume_from = temp_path.stat().st_size
         if resume_from > 0:
-            logger.info(f"Resuming download from {resume_from} bytes")
+            logger.info("Resuming download from %s bytes", resume_from)
             file_mode = "ab"  # Append mode for resume
         else:
             # Empty file, start fresh
@@ -242,8 +242,8 @@ def download_file(
     
     try:
         if resume_from == 0:
-            logger.info(f"Downloading file from {url}...")
-        logger.debug(f"Downloading to temporary file: {temp_path}")
+            logger.debug("Downloading file from %s", url)
+        logger.debug("Downloading to temporary file: %s", temp_path)
         
         # Prepare headers
         headers = {
@@ -300,7 +300,7 @@ def download_file(
         # request that started at github.com/api.github.com can't be redirected
         # to an arbitrary attacker-controlled host.
         if not _is_allowed_asset_response_host(response.url):
-            logger.error(f"Refusing download: response URL is not a trusted GitHub asset host: {response.url}")
+            logger.error("Refusing download: response URL is not a trusted GitHub asset host: %s", response.url)
             response.close()
             return False
 
@@ -330,11 +330,11 @@ def download_file(
                     # Log progress every 100 chunks (about every 800KB)
                     if total_size and downloaded % (chunk_size * 100) == 0:
                         percent = min(100, (downloaded * 100) / total_size)
-                        logger.debug(f"Download progress: {percent:.1f}% ({downloaded}/{total_size} bytes)")
+                        logger.debug("Download progress: %.1f%% (%s/%s bytes)", percent, downloaded, total_size)
         
         # Verify download completed
         if total_size and downloaded < total_size:
-            logger.warning(f"Download incomplete: {downloaded}/{total_size} bytes")
+            logger.warning("Download incomplete: %s/%s bytes", downloaded, total_size)
             # Keep temp file for resume on next attempt
             return False
 
@@ -346,24 +346,24 @@ def download_file(
         if expected_size is not None or expected_digest is not None:
             ok, reason = _verify_file(temp_path, expected_size, expected_digest)
             if not ok:
-                logger.error(f"Downloaded file failed verification, discarding: {reason}")
+                logger.error("Downloaded file failed verification, discarding: %s", reason)
                 safe_cleanup(temp_path)
                 return False
-            logger.debug(f"Downloaded file verified: {reason}")
+            logger.debug("Downloaded file verified: %s", reason)
 
         # Rename temporary file to final path (atomic operation)
         temp_path.rename(output_path)
         if resume_from > 0:
-            logger.info(f"Resumed and completed download to {output_path}")
+            logger.info("Resumed and completed download to %s", output_path)
         else:
-            logger.info(f"Downloaded file to {output_path}")
+            logger.info("Downloaded file to %s", output_path)
         return True
     except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to download file: {e}")
+        logger.error("Failed to download file: %s", e)
         # Keep temporary file for resume on next attempt
         return False
     except Exception as e:
-        logger.error(f"Failed to download file: {e}")
+        logger.error("Failed to download file: %s", e)
         # Keep temporary file for resume on next attempt
         return False
 
@@ -394,7 +394,7 @@ def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Opt
     source_path = Path(source)
     if source_path.exists() and source_path.is_file():
         # Local file path
-        logger.info(f"Using local file: {source}")
+        logger.info("Using local file: %s", source)
         return (source_path, True)
 
     # Reject any remote source that isn't a trackIT-Systems GitHub URL, before
@@ -405,10 +405,7 @@ def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Opt
     # the GitHub-release-URL shape below would otherwise fall through to the
     # generic "download whatever URL we were given" path untouched.
     if not is_allowed_source_url(source):
-        logger.error(
-            f"Refusing update source (not a github.com/api.github.com URL for "
-            f"'{ALLOWED_OWNER}'): {source}"
-        )
+        logger.error("Refusing update source (not a github.com/api.github.com URL for '%s'): %s", ALLOWED_OWNER, source)
         return (None, False)
 
     # Check if this is a GitHub release URL
@@ -417,7 +414,7 @@ def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Opt
     asset_size: Optional[int] = None
     asset_digest: Optional[str] = None
     if source.startswith("https://github.com/") and "/releases/" in source:
-        logger.debug(f"Detected GitHub release URL: {source}")
+        logger.debug("Detected GitHub release URL: %s", source)
         # Extract asset name from original URL before resolving
         # Format: https://github.com/owner/repo/releases/download/tag/asset-name
         if "/releases/download/" in source:
@@ -436,18 +433,18 @@ def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Opt
         # "public repo, no GH_TOKEN" case - the one most deployments are in.
         asset = resolve_github_release_asset(source)
         if not asset:
-            logger.error(f"Failed to resolve GitHub release URL: {source}")
+            logger.error("Failed to resolve GitHub release URL: %s", source)
             return (None, False)
         download_url = asset["url"]
         asset_size = asset.get("size")
         asset_digest = asset.get("digest")
-        logger.debug(f"Resolved GitHub release URL to: {download_url} (size={asset_size}, digest={asset_digest})")
+        logger.debug("Resolved GitHub release URL to: %s (size=%s, digest=%s)", download_url, asset_size, asset_digest)
     
     # URL - check if already downloaded, otherwise download
     # Determine file name - prefer asset name from GitHub URL, then from download URL
     if asset_name:
         filename = asset_name
-        logger.debug(f"Using asset name from GitHub URL: {filename}")
+        logger.debug("Using asset name from GitHub URL: %s", filename)
     else:
         filename = Path(download_url).name
         if not filename or filename == download_url or filename.isdigit():
@@ -472,9 +469,9 @@ def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Opt
     # Ensure artifacts directory exists
     try:
         artifacts_path.mkdir(parents=True, exist_ok=True)
-        logger.debug(f"Using artifacts directory: {artifacts_path}")
+        logger.debug("Using artifacts directory: %s", artifacts_path)
     except OSError as e:
-        logger.error(f"Could not create artifacts directory {artifacts_path}: {e}")
+        logger.error("Could not create artifacts directory %s: %s", artifacts_path, e)
         return (None, False)
     
     # Check if file already exists (preserve .tmp files for resumable downloads).
@@ -489,23 +486,23 @@ def ensure_file(source: str, artifacts_path: Optional[Path] = None) -> Tuple[Opt
             if asset_size is not None or asset_digest is not None:
                 ok, reason = _verify_file(downloaded_path, asset_size, asset_digest)
                 if ok:
-                    logger.info(f"File already exists and verified ({reason}): {downloaded_path}")
-                    logger.info("Skipping download, using existing file")
+                    logger.debug("Skipping download, using existing verified file (%s): %s", reason, downloaded_path)
                     return (downloaded_path, False)
-                logger.warning(f"Cached file failed verification ({reason}), re-downloading: {downloaded_path}")
+                logger.warning("Cached file failed verification (%s), re-downloading: %s", reason, downloaded_path)
                 downloaded_path.unlink()
             else:
                 logger.warning(
-                    f"Cached file exists but no size/digest available to verify it against "
-                    f"({downloaded_path}); re-downloading rather than trusting it unverified"
+                    "Cached file exists but no size/digest available to verify it against (%s); re-downloading "
+                    "rather than trusting it unverified",
+                    downloaded_path,
                 )
                 downloaded_path.unlink()
         else:
-            logger.warning(f"Existing file is empty, re-downloading")
+            logger.warning("Existing file is empty, re-downloading")
             downloaded_path.unlink()
 
     # Download file
-    logger.info(f"Downloading file from URL: {download_url}")
+    logger.info("Downloading file from URL: %s", download_url)
     if not download_file(download_url, downloaded_path, expected_size=asset_size, expected_digest=asset_digest):
         return (None, False)
 

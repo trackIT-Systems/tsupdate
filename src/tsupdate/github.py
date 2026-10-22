@@ -60,9 +60,9 @@ def initialize_github_token() -> None:
     except subprocess.TimeoutExpired:
         logger.debug("'gh auth token' command timed out")
     except subprocess.CalledProcessError as e:
-        logger.debug(f"'gh auth token' failed: {e.stderr.strip()}")
+        logger.debug("'gh auth token' failed: %s", e.stderr.strip())
     except Exception as e:
-        logger.debug(f"Unexpected error running 'gh auth token': {e}")
+        logger.debug("Unexpected error running 'gh auth token': %s", e)
     
     # No token available
     _github_token = None
@@ -108,7 +108,7 @@ def parse_github_repo_url(support_url: str) -> Optional[Tuple[str, str]]:
     match = re.fullmatch(pattern, support_url.strip())
 
     if not match:
-        logger.warning(f"Could not parse GitHub repo URL from: {support_url}")
+        logger.warning("Could not parse GitHub repo URL from: %s", support_url)
         return None
 
     owner = match.group(1)
@@ -116,12 +116,14 @@ def parse_github_repo_url(support_url: str) -> Optional[Tuple[str, str]]:
 
     if owner.lower() != ALLOWED_OWNER.lower():
         logger.warning(
-            f"Rejecting update source from disallowed owner '{owner}' "
-            f"(only '{ALLOWED_OWNER}' is accepted): {support_url}"
+            "Rejecting update source from disallowed owner '%s' (only '%s' is accepted): %s",
+            owner,
+            ALLOWED_OWNER,
+            support_url,
         )
         return None
 
-    logger.debug(f"Parsed GitHub repo: {owner}/{repo} from {support_url}")
+    logger.debug("Parsed GitHub repo: %s/%s from %s", owner, repo, support_url)
     return (owner, repo)
 
 
@@ -145,13 +147,17 @@ def _create_github_client():
         try:
             rate_limit = g.get_rate_limit()
             if hasattr(rate_limit, 'resources') and hasattr(rate_limit.resources, 'core'):
-                logger.debug(f"Rate limit remaining: {rate_limit.resources.core.remaining}/{rate_limit.resources.core.limit}")
+                logger.debug(
+                    "Rate limit remaining: %s/%s",
+                    rate_limit.resources.core.remaining,
+                    rate_limit.resources.core.limit,
+                )
             elif hasattr(rate_limit, 'rate'):
-                logger.debug(f"Rate limit remaining: {rate_limit.rate.remaining}/{rate_limit.rate.limit}")
+                logger.debug("Rate limit remaining: %s/%s", rate_limit.rate.remaining, rate_limit.rate.limit)
             else:
                 logger.debug("Rate limit checked (structure unknown)")
         except Exception as e:
-            logger.warning(f"Could not verify GitHub token: {e}")
+            logger.warning("Could not verify GitHub token: %s", e)
     else:
         g = Github(retry=0)
         logger.debug("Using unauthenticated GitHub API access")
@@ -169,17 +175,29 @@ def _handle_github_exception(e: GithubException, owner: str, repo: str) -> None:
     """
     if e.status == 404:
         if get_github_token():
-            logger.error(f"Repository not found or access denied: {owner}/{repo}")
-            logger.error("This may be a private repository. Ensure your token has 'repo' scope permissions.")
+            logger.error(
+                "Repository not found or access denied: %s/%s; if it is a private repository, "
+                "ensure your token has 'repo' scope permissions",
+                owner,
+                repo,
+            )
         else:
-            logger.error(f"Repository not found: {owner}/{repo}")
-            logger.error("If this is a private repository, set GH_TOKEN environment variable with a token that has 'repo' scope.")
+            logger.error(
+                "Repository not found: %s/%s; if it is a private repository, "
+                "set the GH_TOKEN environment variable to a token that has 'repo' scope",
+                owner,
+                repo,
+            )
     elif e.status == 403:
-        logger.error("GitHub API rate limit exceeded or access forbidden")
         if get_github_token():
-            logger.error("Check that your token has the necessary permissions (e.g., 'repo' scope for private repos)")
+            logger.error(
+                "GitHub API rate limit exceeded or access forbidden; check that your token has the necessary "
+                "permissions (e.g., 'repo' scope for private repos)"
+            )
+        else:
+            logger.error("GitHub API rate limit exceeded or access forbidden")
     else:
-        logger.error(f"GitHub API error: {e.status} {e.data}")
+        logger.error("GitHub API error: %s %s", e.status, e.data)
 
 
 def _get_assets_from_release(release) -> List[dict]:
@@ -213,10 +231,10 @@ def _get_assets_from_release(release) -> List[dict]:
                 if 'id' in asset_data:
                     asset_info['id'] = asset_data['id']
                 assets.append(asset_info)
-            logger.debug(f"Found {len(assets)} assets from raw_data")
+            logger.debug("Found %s assets from raw_data", len(assets))
             return assets
     except (AttributeError, KeyError, TypeError) as e:
-        logger.debug(f"Could not access raw_data, falling back to API call: {e}")
+        logger.debug("Could not access raw_data, falling back to API call: %s", e)
 
     # Fallback: use API call
     try:
@@ -229,9 +247,9 @@ def _get_assets_from_release(release) -> List[dict]:
                 'digest': getattr(asset, 'digest', None),
             }
             assets.append(asset_info)
-        logger.debug(f"Found {len(assets)} assets from API call")
+        logger.debug("Found %s assets from API call", len(assets))
     except Exception as e:
-        logger.debug(f"Error fetching assets via API: {e}")
+        logger.debug("Error fetching assets via API: %s", e)
     
     return assets
 
@@ -267,11 +285,13 @@ def parse_github_release_url(url: str) -> Optional[Tuple[str, str, Optional[str]
         owner, repo, tag, asset_name = match.groups()
         if owner.lower() != ALLOWED_OWNER.lower():
             logger.warning(
-                f"Rejecting release URL from disallowed owner '{owner}' "
-                f"(only '{ALLOWED_OWNER}' is accepted): {url}"
+                "Rejecting release URL from disallowed owner '%s' (only '%s' is accepted): %s",
+                owner,
+                ALLOWED_OWNER,
+                url,
             )
             return None
-        logger.debug(f"Parsed GitHub release download URL: {owner}/{repo} tag={tag} asset={asset_name}")
+        logger.debug("Parsed GitHub release download URL: %s/%s tag=%s asset=%s", owner, repo, tag, asset_name)
         return (owner, repo, tag, asset_name)
 
     # Pattern for release page URL: /releases/tag/tag-name
@@ -281,14 +301,16 @@ def parse_github_release_url(url: str) -> Optional[Tuple[str, str, Optional[str]
         owner, repo, tag = match.groups()
         if owner.lower() != ALLOWED_OWNER.lower():
             logger.warning(
-                f"Rejecting release URL from disallowed owner '{owner}' "
-                f"(only '{ALLOWED_OWNER}' is accepted): {url}"
+                "Rejecting release URL from disallowed owner '%s' (only '%s' is accepted): %s",
+                owner,
+                ALLOWED_OWNER,
+                url,
             )
             return None
-        logger.debug(f"Parsed GitHub release tag URL: {owner}/{repo} tag={tag}")
+        logger.debug("Parsed GitHub release tag URL: %s/%s tag=%s", owner, repo, tag)
         return (owner, repo, tag, None)
 
-    logger.debug(f"Could not parse GitHub release URL: {url}")
+    logger.debug("Could not parse GitHub release URL: %s", url)
     return None
 
 
@@ -313,7 +335,7 @@ def resolve_github_release_asset(url: str) -> Optional[dict]:
     # Parse the URL
     parsed = parse_github_release_url(url)
     if not parsed:
-        logger.error(f"Invalid GitHub release URL format: {url}")
+        logger.error("Invalid GitHub release URL format: %s", url)
         return None
 
     owner, repo, tag, asset_name = parsed
@@ -333,9 +355,9 @@ def resolve_github_release_asset(url: str) -> Optional[dict]:
                 release = repository.get_release(tag)
             except GithubException as e:
                 if e.status == 404:
-                    logger.error(f"Release tag '{tag}' not found in {owner}/{repo}")
+                    logger.error("Release tag '%s' not found in %s/%s", tag, owner, repo)
                 else:
-                    logger.error(f"Error fetching release: {e.status} {e.data}")
+                    logger.error("Error fetching release: %s %s", e.status, e.data)
                 return None
 
             # Find the asset by name
@@ -349,28 +371,28 @@ def resolve_github_release_asset(url: str) -> Optional[dict]:
                     if github_token and 'id' in asset_info:
                         # For private repos with auth, use API endpoint
                         api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_info['id']}"
-                        logger.debug(f"Found asset: {asset_name} -> API endpoint (authenticated): {api_url}")
+                        logger.debug("Found asset: %s -> API endpoint (authenticated): %s", asset_name, api_url)
                         return {"url": api_url, **metadata}
                     else:
                         # For public repos or when no token, use browser_download_url
                         browser_url = asset_info.get('url', '')
                         if browser_url:
-                            logger.debug(f"Found asset: {asset_name} -> browser_download_url: {browser_url}")
+                            logger.debug("Found asset: %s -> browser_download_url: %s", asset_name, browser_url)
                             return {"url": browser_url, **metadata}
                         elif 'id' in asset_info:
                             # Fallback to API endpoint if browser_url not available
                             api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_info['id']}"
-                            logger.debug(f"Found asset: {asset_name} -> API endpoint (fallback): {api_url}")
+                            logger.debug("Found asset: %s -> API endpoint (fallback): %s", asset_name, api_url)
                             return {"url": api_url, **metadata}
 
-            logger.error(f"Asset '{asset_name}' not found in release '{tag}'")
+            logger.error("Asset '%s' not found in release '%s'", asset_name, tag)
             return None
 
         except GithubException as e:
             _handle_github_exception(e, owner, repo)
             return None
         except Exception as e:
-            logger.error(f"Unexpected error resolving GitHub release URL: {e}")
+            logger.error("Unexpected error resolving GitHub release URL: %s", e)
             return None
 
     # If we only have tag (no asset name), we need to find the asset
@@ -408,7 +430,7 @@ def fetch_releases(
     try:
         # Create GitHub client
         g = _create_github_client()
-        logger.debug(f"Fetching releases from: {owner}/{repo}")
+        logger.debug("Fetching releases from: %s/%s", owner, repo)
         repository = g.get_repo(f"{owner}/{repo}")
         
         # Releases are sorted by date, latest first. get_releases() pages lazily, so stop
@@ -419,14 +441,14 @@ def fetch_releases(
         releases = list(itertools.islice(candidates, limit))
         
         kind = "releases" if include_prereleases else "regular releases (excluding pre-releases)"
-        logger.debug(f"Fetched {len(releases)} {kind}" + (f" (limit {limit})" if limit is not None else ""))
+        logger.debug("Fetched %s %s%s", len(releases), kind, f" (limit {limit})" if limit is not None else "")
         return releases
                 
     except GithubException as e:
         _handle_github_exception(e, owner, repo)
         return None
     except Exception as e:
-        logger.error(f"Unexpected error fetching releases: {e}")
+        logger.error("Unexpected error fetching releases: %s", e)
         return None
 
 
@@ -449,7 +471,7 @@ def find_latest_image(releases: List) -> Optional[str]:
     # Get latest release (first in list, sorted by date)
     latest_release = releases[0]
     
-    logger.debug(f"Searching for image in latest release: {latest_release.tag_name}")
+    logger.debug("Searching for image in latest release: %s", latest_release.tag_name)
     
     # Get assets from release
     asset_candidates = _get_assets_from_release(latest_release)
@@ -470,14 +492,14 @@ def find_latest_image(releases: List) -> Optional[str]:
         # Check if file has an allowed extension
         if name.endswith(allowed_extensions):
             size = asset_info['size']
-            logger.debug(f"Found candidate image file: {asset_info['name']} ({size} bytes)")
+            logger.debug("Found candidate image file: %s (%s bytes)", asset_info['name'], size)
             
             if size > largest_size:
                 largest_size = size
                 largest_asset = asset_info
     
     if largest_asset:
-        logger.debug(f"Selected largest image file: {largest_asset['name']} ({largest_size} bytes)")
+        logger.debug("Selected largest image file: %s (%s bytes)", largest_asset['name'], largest_size)
         return largest_asset['url']
     
     logger.debug("No image file found in latest release")
@@ -513,19 +535,19 @@ def find_applicable_batch_update(releases: List, current_version: str, max_relea
     # Variant can be any string (e.g., "base", "pro")
     pattern = rf'tsOS-([^-]+)-arm64-update-{escaped_version}-to-([0-9.]+)\.tar(\.gz)?$'
     
-    logger.debug(f"Searching for batch update matching pattern: tsOS-*-arm64-update-{current_version}-to-*.tar")
+    logger.debug("Searching for batch update matching pattern: tsOS-*-arm64-update-%s-to-*.tar", current_version)
     
     # Limit search to most recent releases to reduce API calls
     # The "next" update should logically be in recent releases
     releases_to_check = releases[:max_releases]
-    logger.debug(f"Checking {len(releases_to_check)} most recent releases (out of {len(releases)} total)")
+    logger.debug("Checking %s most recent releases (out of %s total)", len(releases_to_check), len(releases))
     
     # Search through recent releases (they should be sorted by date, latest first)
     for release in releases_to_check:
         # Get assets from release
         assets = _get_assets_from_release(release)
         if not assets:
-            logger.debug(f"No assets found for release {release.tag_name}")
+            logger.debug("No assets found for release %s", release.tag_name)
             continue
         
         # Check asset names against pattern
@@ -535,9 +557,18 @@ def find_applicable_batch_update(releases: List, current_version: str, max_relea
             if match:
                 variant = match.group(1)
                 next_version = match.group(2)
-                logger.debug(f"Found applicable batch update: {name} (variant: {variant}, updates to: {next_version})")
+                logger.debug(
+                    "Found applicable batch update: %s (variant: %s, updates to: %s)",
+                    name,
+                    variant,
+                    next_version,
+                )
                 return asset_info['url']
     
-    logger.debug(f"No applicable batch update found for version {current_version} in {len(releases_to_check)} recent releases")
+    logger.debug(
+        "No applicable batch update found for version %s in %s recent releases",
+        current_version,
+        len(releases_to_check),
+    )
     return None
 

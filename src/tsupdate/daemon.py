@@ -49,10 +49,10 @@ def _validate_int_option(config: dict, key: str, minimum: int, default: int) -> 
         config[key] = default
         return
     if isinstance(value, bool) or not isinstance(value, int):
-        logger.error(f"{key} must be an integer (got {type(value).__name__}: {value!r})")
+        logger.error("%s must be an integer (got %s: %r)", key, type(value).__name__, value)
         sys.exit(1)
     if value < minimum:
-        logger.warning(f"{key} ({value}) must be at least {minimum}; using default {default}")
+        logger.warning("%s (%s) must be at least %s; using default %s", key, value, minimum, default)
         config[key] = default
 
 
@@ -88,8 +88,7 @@ def load_config(config_path: Path) -> dict:
     
     # If config file doesn't exist, use defaults
     if not config_path.exists():
-        logger.warning(f"Configuration file not found: {config_path}")
-        logger.info("Using default configuration")
+        logger.warning("Configuration file not found, using default configuration: %s", config_path)
         return default_config
     
     # Load YAML file
@@ -98,11 +97,11 @@ def load_config(config_path: Path) -> dict:
             user_config = yaml.safe_load(f)
         
         if user_config is None:
-            logger.warning(f"Configuration file is empty: {config_path}")
+            logger.warning("Configuration file is empty: %s", config_path)
             return default_config
         
         if not isinstance(user_config, dict):
-            logger.error(f"Invalid configuration format in {config_path}: expected dictionary")
+            logger.error("Invalid configuration format in %s: expected dictionary", config_path)
             sys.exit(1)
         
         # Merge user config with defaults
@@ -114,9 +113,10 @@ def load_config(config_path: Path) -> dict:
             mode = user_config.get("do")
             if mode not in valid_modes:
                 logger.warning(
-                    f"Invalid do value: {mode}. "
-                    f"Valid values are: {', '.join(sorted(valid_modes))}. "
-                    f"Using default: {default_config['do']}"
+                    "Invalid do value: %s; valid values are: %s; using default: %s",
+                    mode,
+                    ', '.join(sorted(valid_modes)),
+                    default_config['do'],
                 )
                 config["do"] = default_config["do"]
         
@@ -125,9 +125,9 @@ def load_config(config_path: Path) -> dict:
             mode = user_config.get("maintenance_do")
             if mode not in valid_modes:
                 logger.warning(
-                    f"Invalid maintenance_do value: {mode}. "
-                    f"Valid values are: {', '.join(sorted(valid_modes))}. "
-                    f"Using default behavior"
+                    "Invalid maintenance_do value: %s; valid values are: %s; using default behavior",
+                    mode,
+                    ', '.join(sorted(valid_modes)),
                 )
                 config["maintenance_do"] = None
         
@@ -136,13 +136,17 @@ def load_config(config_path: Path) -> dict:
         check_interval = config.get("check_interval", 3600)
         if not isinstance(check_interval, int):
             logger.error(
-                f"check_interval must be an integer in seconds (got {type(check_interval).__name__}: {check_interval})"
+                "check_interval must be an integer in seconds (got %s: %s)",
+                type(check_interval).__name__,
+                check_interval,
             )
             sys.exit(1)
         elif check_interval < min_interval:
             logger.warning(
-                f"check_interval ({check_interval}) is less than minimum ({min_interval}s). "
-                f"Setting to {min_interval}s"
+                "check_interval (%s) is less than minimum (%ss); setting to %ss",
+                check_interval,
+                min_interval,
+                min_interval,
             )
             config["check_interval"] = min_interval
         
@@ -154,13 +158,17 @@ def load_config(config_path: Path) -> dict:
         maintenance_check_interval = config.get("maintenance_check_interval", 3600)
         if not isinstance(maintenance_check_interval, int):
             logger.error(
-                f"maintenance_check_interval must be an integer in seconds (got {type(maintenance_check_interval).__name__}: {maintenance_check_interval})"
+                "maintenance_check_interval must be an integer in seconds (got %s: %s)",
+                type(maintenance_check_interval).__name__,
+                maintenance_check_interval,
             )
             sys.exit(1)
         elif maintenance_check_interval < min_interval:
             logger.warning(
-                f"maintenance_check_interval ({maintenance_check_interval}) is less than minimum ({min_interval}s). "
-                f"Setting to {min_interval}s"
+                "maintenance_check_interval (%s) is less than minimum (%ss); setting to %ss",
+                maintenance_check_interval,
+                min_interval,
+                min_interval,
             )
             config["maintenance_check_interval"] = min_interval
         
@@ -187,16 +195,16 @@ def load_config(config_path: Path) -> dict:
         _validate_int_option(config, "persist_timeout", minimum=0, default=default_config["persist_timeout"])
         _validate_int_option(config, "max_releases", minimum=1, default=default_config["max_releases"])
         
-        logger.info(f"Loaded configuration from {config_path}")
-        logger.debug(f"Configuration: {config}")
+        logger.info("Loaded configuration from %s", config_path)
+        logger.debug("Configuration: %s", config)
         
         return config
         
     except yaml.YAMLError as e:
-        logger.error(f"Failed to parse YAML configuration: {e}")
+        logger.error("Failed to parse YAML configuration: %s", e)
         sys.exit(1)
     except (OSError, IOError) as e:
-        logger.error(f"Failed to read configuration file: {e}")
+        logger.error("Failed to read configuration file: %s", e)
         sys.exit(1)
 
 
@@ -211,7 +219,7 @@ def signal_handler(signum: int, frame) -> None:
     global _cancel_update, _shutdown_requested
     
     signal_name = signal.Signals(signum).name
-    logger.info(f"Received signal {signal_name}")
+    logger.info("Received signal %s", signal_name)
     
     # Cancels a pending reboot countdown (a no-op at any other time) ...
     _cancel_update = True
@@ -264,18 +272,24 @@ def handle_tryboot_persist(timeout: int) -> bool:
     
     # Get current system uptime
     uptime = get_system_uptime()
-    logger.info(f"System booted via tryboot (uptime: {uptime:.1f} seconds)")
-    logger.info(f"Will persist configuration after {timeout} seconds of uptime")
-    logger.info("This allows time to verify the update was successful")
+    logger.info(
+        "System booted via tryboot (uptime: %.1f seconds), will persist configuration after %s seconds of uptime "
+        "to allow time to verify the update was successful",
+        uptime,
+        timeout,
+    )
     
     # Calculate remaining wait time based on uptime
     remaining_wait = timeout - uptime
     
     if remaining_wait <= 0:
-        logger.info(f"System uptime ({uptime:.1f}s) already exceeds persist timeout ({timeout}s)")
-        logger.info("Persisting configuration immediately")
+        logger.info(
+            "System uptime (%.1fs) already exceeds persist timeout (%ss), persisting configuration immediately",
+            uptime,
+            timeout,
+        )
     else:
-        logger.info(f"Waiting {remaining_wait:.1f} seconds before persisting (until uptime reaches {timeout}s)")
+        logger.info("Waiting %.1f seconds before persisting (until uptime reaches %ss)", remaining_wait, timeout)
         
         # Sleep in small intervals to allow signal handling
         elapsed = 0.0
@@ -295,17 +309,20 @@ def handle_tryboot_persist(timeout: int) -> bool:
             if remaining > 0 and elapsed - last_progress >= 60:
                 last_progress = elapsed
                 uptime_at_persist = uptime + remaining_wait
-                logger.info(f"Persisting tryboot configuration in {remaining:.0f} seconds (at uptime {uptime_at_persist:.0f}s)...")
+                logger.debug(
+                    "Persisting tryboot configuration in %.0f seconds (at uptime %.0fs)",
+                    remaining,
+                    uptime_at_persist,
+                )
     
     # Persist the configuration
-    logger.info("Persisting tryboot boot configuration...")
+    logger.debug("Persisting tryboot boot configuration")
     if persist_boot_configuration():
         final_uptime = get_system_uptime()
-        logger.info(f"Boot configuration persisted successfully at uptime {final_uptime:.1f}s")
+        logger.info("Boot configuration persisted successfully at uptime %.1fs", final_uptime)
         return True
     
-    logger.error("Failed to persist boot configuration")
-    logger.error("Manual intervention may be required")
+    logger.error("Failed to persist boot configuration, manual intervention may be required")
     return False
 
 
@@ -326,13 +343,14 @@ def finalize_boot(persist_timeout: int) -> None:
 
 def notify_users(message: str) -> None:
     """
-    Notify users via logging and wall command.
+    Notify users via the wall command.
+
+    The message is logged at DEBUG only: every caller logs the event itself.
     
     Args:
         message: Message to broadcast
     """
-    # Log the message
-    logger.info(message)
+    logger.debug("Broadcasting via wall: %s", message)
     
     # Broadcast via wall command
     try:
@@ -348,7 +366,7 @@ def notify_users(message: str) -> None:
     except subprocess.TimeoutExpired:
         logger.warning("wall command timed out")
     except Exception as e:
-        logger.debug(f"Failed to broadcast via wall: {e}")
+        logger.debug("Failed to broadcast via wall: %s", e)
 
 
 def countdown_with_cancel(seconds: int) -> bool:
@@ -367,13 +385,13 @@ def countdown_with_cancel(seconds: int) -> bool:
     global _cancel_update
     _cancel_update = False
     
-    logger.info(f"Starting countdown: {seconds} seconds until reboot")
+    logger.info("Starting countdown: %s seconds until reboot", seconds)
     
     for remaining in range(seconds, 0, -1):
         # _shutdown_requested also covers a SIGTERM that arrived while the update was
         # still being applied, before this countdown started.
         if _cancel_update or _shutdown_requested:
-            logger.info("Update cancelled by signal")
+            logger.debug("Update cancelled by signal")
             _cancel_update = False
             return False
         
@@ -383,11 +401,11 @@ def countdown_with_cancel(seconds: int) -> bool:
         elif remaining == 10:
             notify_users(f"WARNING: System will reboot in 10 seconds. Send SIGTERM to cancel.")
         elif remaining % 10 == 0:
-            logger.debug(f"Countdown: {remaining} seconds remaining")
+            logger.debug("Countdown: %s seconds remaining", remaining)
         
         time.sleep(1)
     
-    logger.info("Countdown complete")
+    logger.debug("Countdown complete")
     return True
 
 
@@ -432,9 +450,10 @@ def next_check_delay(
         return check_interval
 
     if do_mode == "nothing" or until_window < check_interval:
-        logger.info(
-            f"Next maintenance window starts at {next_start.strftime('%Y-%m-%d %H:%M:%S %Z')} "
-            f"({until_window:.0f} seconds)"
+        logger.debug(
+            "Next maintenance window starts at %s (%.0f seconds)",
+            next_start.strftime('%Y-%m-%d %H:%M:%S %Z'),
+            until_window,
         )
         return until_window
     return check_interval
@@ -459,7 +478,7 @@ def download_update(update_url: str, config: dict) -> Optional[Path]:
         Path to downloaded file if successful, None otherwise
     """
     try:
-        logger.info(f"Downloading update from {update_url}...")
+        logger.debug("Downloading update from %s", update_url)
         
         # Use ensure_file to download (or use cached file if already downloaded)
         file_path, is_local = ensure_file(update_url, ARTIFACTS_DIR)
@@ -469,15 +488,15 @@ def download_update(update_url: str, config: dict) -> Optional[Path]:
             return None
         
         if is_local:
-            logger.info(f"Using existing local file: {file_path}")
+            logger.debug("Using existing local file: %s", file_path)
         else:
             file_size = file_path.stat().st_size
-            logger.info(f"Downloaded update file: {file_path} ({file_size} bytes)")
+            logger.debug("Downloaded update file: %s (%s bytes)", file_path, file_size)
         
         return file_path
         
-    except Exception as e:
-        logger.error(f"Error downloading update: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Error downloading update")
         return None
 
 
@@ -542,13 +561,13 @@ def check_for_updates(config: dict) -> Optional[str]:
         github_url = config.get("github_url")
         if github_url:
             support_url = github_url
-            logger.debug(f"Using GitHub URL from config: {support_url}")
+            logger.debug("Using GitHub URL from config: %s", support_url)
         else:
             support_url = os_release.get("SUPPORT_URL")
             if not support_url:
                 logger.error("SUPPORT_URL not found in /etc/os-release and no github_url in config")
                 return None
-            logger.debug(f"Using SUPPORT_URL from os-release: {support_url}")
+            logger.debug("Using SUPPORT_URL from os-release: %s", support_url)
         
         # Get VERSION_ID
         version_id = os_release.version_id
@@ -556,16 +575,16 @@ def check_for_updates(config: dict) -> Optional[str]:
             logger.error("VERSION_ID not found in /etc/os-release")
             return None
         
-        logger.debug(f"Current VERSION_ID: {version_id}")
+        logger.debug("Current VERSION_ID: %s", version_id)
         
         # Parse GitHub repo URL
         repo_info = parse_github_repo_url(support_url)
         if not repo_info:
-            logger.error(f"Could not parse GitHub repository URL: {support_url}")
+            logger.error("Could not parse GitHub repository URL: %s", support_url)
             return None
         
         owner, repo = repo_info
-        logger.debug(f"GitHub repository: {owner}/{repo}")
+        logger.debug("GitHub repository: %s/%s", owner, repo)
         
         # Fetch releases
         include_prereleases = config.get("include_prereleases", False)
@@ -579,14 +598,14 @@ def check_for_updates(config: dict) -> Optional[str]:
         batch_url = find_applicable_batch_update(releases, version_id, max_releases=max_releases)
         
         if batch_url:
-            logger.info(f"Update available: {batch_url}")
+            logger.debug("Update available: %s", batch_url)
             return batch_url
         else:
-            logger.debug(f"No applicable batch update found for version {version_id}")
+            logger.debug("No applicable batch update found for version %s", version_id)
             return None
             
-    except Exception as e:
-        logger.error(f"Error checking for updates: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Error checking for updates")
         return None
 
 
@@ -608,7 +627,7 @@ def sync_and_apply_update(update_file_path: Path, config: dict, update_url: Opti
     """
     try:
         # Step 1: Sync root partition to inactive partition
-        logger.info("Preparing inactive partition...")
+        logger.info("Preparing inactive partition")
         notify_users("Preparing system update - syncing partitions...")
         
         rsync_timeout = config.get("rsync_timeout", DEFAULT_RSYNC_TIMEOUT_SEC)
@@ -621,7 +640,7 @@ def sync_and_apply_update(update_file_path: Path, config: dict, update_url: Opti
         logger.info("Partition sync complete")
         
         # Step 2: Apply the update
-        logger.info(f"Applying update from {update_file_path}...")
+        logger.info("Applying update from %s", update_file_path)
         notify_users(f"Applying update: {update_file_path.name}")
         
         # Use file path directly (execute_apply will handle it)
@@ -647,27 +666,29 @@ def sync_and_apply_update(update_file_path: Path, config: dict, update_url: Opti
         
         # Step 4: Countdown with cancellation support
         if not countdown_with_cancel(countdown):
-            logger.info("Update cancelled - system will not reboot")
             if update_url:
                 # Remember the cancellation: the daemon stops on this signal and systemd
                 # restarts it, which would otherwise just apply the same update again.
                 update_state.block(update_url, _running_version())
                 logger.info(
-                    f"This update will not be applied again automatically; "
-                    f"remove {update_state.STATE_FILE} to allow it"
+                    "Update cancelled, system will not reboot; this update will not be applied again "
+                    "automatically, remove %s to allow it",
+                    update_state.STATE_FILE,
                 )
+            else:
+                logger.info("Update cancelled, system will not reboot")
             notify_users("Update cancelled - system will not reboot. Update remains on inactive partition.")
             return False
         
         # Step 5: Execute tryboot (which will reboot the system)
-        logger.info("Initiating tryboot reboot...")
+        logger.info("Initiating tryboot reboot")
         notify_users("Rebooting to activate update (via tryboot)...")
         
         # Record the attempt *before* rebooting: if the new partition fails to boot, the
         # firmware falls back to this one and the daemon would find the same update again.
         if update_url:
             attempts = update_state.record_attempt(update_url, _running_version())
-            logger.info(f"Update attempt {attempts} of {update_state.MAX_UPDATE_ATTEMPTS}")
+            logger.info("Update attempt %s of %s", attempts, update_state.MAX_UPDATE_ATTEMPTS)
         
         tryboot_result = execute_tryboot(reboot=True)
         if tryboot_result != 0:
@@ -681,7 +702,7 @@ def sync_and_apply_update(update_file_path: Path, config: dict, update_url: Opti
         return True
         
     except Exception as e:
-        logger.error(f"Error during update workflow: {e}", exc_info=True)
+        logger.exception("Error during update workflow")
         notify_users(f"Update failed: {e}")
         return False
 
@@ -710,15 +731,74 @@ def apply_update_workflow(update_url: str, config: dict, update_file_path: Optio
                 notify_users("Update failed: could not download update")
                 return False
         else:
-            logger.info(f"Using already downloaded update file: {update_file_path}")
+            logger.info("Using already downloaded update file: %s", update_file_path)
         
         # Sync and apply the update
         return sync_and_apply_update(update_file_path, config, update_url)
         
     except Exception as e:
-        logger.error(f"Error during update workflow: {e}", exc_info=True)
+        logger.exception("Error during update workflow")
         notify_users(f"Update failed: {e}")
         return False
+
+
+class _LoopLog:
+    """
+    What the main loop last logged, so that a state repeated every iteration is logged once.
+
+    A failure is logged when it starts, again only when its text changes, and once when the
+    loop works again; the repeats go to DEBUG. The same goes for a pending update, a blocked
+    update and the maintenance window.
+    """
+
+    def __init__(self) -> None:
+        self.error: str | None = None
+        self.found: tuple[str, str] | None = None
+        self.blocked: str | None = None
+        self.in_window: bool | None = None
+
+    def failed(self, error: Exception) -> None:
+        message = f"{type(error).__name__}: {error}"
+        if self.error != message:
+            logger.error("Error in main loop, continuing operation: %s", message, exc_info=error)
+        else:
+            logger.debug("Error in main loop again: %s", message, exc_info=error)
+        self.error = message
+
+    def succeeded(self) -> None:
+        if self.error is not None:
+            logger.info("Main loop works again")
+            self.error = None
+
+    def window(self, in_window: bool, maintenance_entry: dict) -> bool:
+        """Log entering and leaving the maintenance window. Returns whether that changed."""
+        changed = in_window != self.in_window
+        if changed:
+            start, stop = maintenance_entry.get("start"), maintenance_entry.get("stop")
+            if self.in_window is None:
+                where = "inside" if in_window else "outside"
+                logger.info("Starting %s the maintenance window (%s - %s)", where, start, stop)
+            elif in_window:
+                logger.info("Entering maintenance window (%s - %s)", start, stop)
+            else:
+                logger.info("Leaving maintenance window (%s - %s)", start, stop)
+        self.in_window = in_window
+        return changed
+
+    def found_level(self, update_url: str | None, do_mode: str) -> int:
+        """INFO for an update not found before (or found in another mode), DEBUG while it stays pending."""
+        found = (update_url, do_mode) if update_url else None
+        level = logging.INFO if found is not None and found != self.found else logging.DEBUG
+        self.found = found
+        if not update_url:
+            self.blocked = None
+        return level
+
+    def blocked_level(self, update_url: str) -> int:
+        """WARNING the first time an update is found blocked, DEBUG while it stays blocked."""
+        level = logging.WARNING if update_url != self.blocked else logging.DEBUG
+        self.blocked = update_url
+        return level
 
 
 def main_loop(config: dict, maintenance_entry: Optional[dict] = None) -> None:
@@ -740,21 +820,27 @@ def main_loop(config: dict, maintenance_entry: Optional[dict] = None) -> None:
         maintenance_interval = config.get("maintenance_check_interval", regular_interval)
         maintenance_do = config.get("maintenance_do", "apply")
         logger.info(
-            f"Maintenance schedule is active - "
-            f"Regular: check_interval={regular_interval}s, do={regular_do}; "
-            f"Maintenance: check_interval={maintenance_interval}s, do={maintenance_do}"
+            "Maintenance schedule is active - Regular: check_interval=%ss, do=%s; Maintenance: check_interval=%ss, "
+            "do=%s",
+            regular_interval,
+            regular_do,
+            maintenance_interval,
+            maintenance_do,
         )
     else:
         check_interval = config.get("check_interval", 3600)
         do_mode = config.get("do", "check")
-        logger.info(f"No maintenance schedule configured - check_interval={check_interval}s, do={do_mode}")
+        logger.info("No maintenance schedule configured - check_interval=%ss, do=%s", check_interval, do_mode)
     
+    loop_log = _LoopLog()
     while not _shutdown_requested:
         try:
             # Determine if we're in maintenance window
             in_maintenance_window = False
+            window_changed = False
             if maintenance_entry:
                 in_maintenance_window = is_in_maintenance_window(maintenance_entry)
+                window_changed = loop_log.window(in_maintenance_window, maintenance_entry)
             
             # Get current behavior based on maintenance window status
             check_interval, do_mode = get_current_behavior(config, maintenance_entry, in_maintenance_window)
@@ -762,66 +848,66 @@ def main_loop(config: dict, maintenance_entry: Optional[dict] = None) -> None:
             # If mode is "nothing", skip check entirely
             if do_mode == "nothing":
                 if in_maintenance_window:
-                    logger.warning("Mode is 'nothing' but inside maintenance window - this is unusual, skipping check")
+                    logger.log(
+                        logging.WARNING if window_changed else logging.DEBUG,
+                        "Mode is 'nothing' but inside maintenance window - this is unusual, skipping check",
+                    )
                 else:
-                    logger.debug(f"Mode is 'nothing' - skipping check")
+                    logger.debug("Mode is 'nothing' - skipping check")
                 
                 delay = next_check_delay(check_interval, do_mode, maintenance_entry, in_maintenance_window)
-                logger.info(f"Next update check in {delay:.0f} seconds")
+                loop_log.succeeded()
+                logger.debug("Next update check in %.0f seconds", delay)
                 sleep_interruptible(delay)
                 continue
             
             # Check for available updates
-            logger.info("Checking for updates...")
+            logger.debug("Checking for updates")
             update_url = check_for_updates(config)
             
+            # An update is logged at INFO when it is found, and at DEBUG on every
+            # further check while it stays pending.
+            level = loop_log.found_level(update_url, do_mode)
+            where = " in maintenance window" if in_maintenance_window else ""
             if update_url:
-                logger.info(f"Update found: {update_url}")
-                
                 # Determine what to do based on current behavior mode
                 if do_mode == "check":
-                    if in_maintenance_window:
-                        logger.info(
-                            "Update found in maintenance window (mode: check) - "
-                            "deferring update. Will check again at next interval."
-                        )
-                    else:
-                        logger.info(
-                            "Update found (mode: check) - "
-                            "deferring update. Will check again at next interval."
-                        )
-                    # Just log and continue to sleep
+                    logger.log(
+                        level,
+                        "Update found%s (mode: check), deferring update until the next check: %s",
+                        where,
+                        update_url,
+                    )
                 elif do_mode == "download":
-                    if in_maintenance_window:
-                        logger.info(
-                            "Update found in maintenance window (mode: download) - "
-                            "downloading update file."
-                        )
-                    else:
-                        logger.info(
-                            "Update found (mode: download) - "
-                            "downloading update file."
-                        )
+                    logger.log(
+                        level, "Update found%s (mode: download), downloading update file: %s", where, update_url
+                    )
                     update_file_path = download_update(update_url, config)
                     if update_file_path:
-                        logger.info(
-                            f"Update downloaded successfully: {update_file_path}. "
-                            "Will apply during next maintenance window or when mode changes to 'apply'."
+                        logger.log(
+                            level,
+                            "Update downloaded successfully to %s, it will be applied during the next maintenance "
+                            "window or when mode changes to 'apply'",
+                            update_file_path,
                         )
                     else:
                         logger.error("Failed to download update")
                 elif do_mode == "apply":
-                    if in_maintenance_window:
-                        logger.info("Update found in maintenance window (mode: apply) - proceeding with full update workflow")
-                    else:
-                        logger.info("Update found (mode: apply) - proceeding with full update workflow")
+                    logger.log(
+                        level,
+                        "Update found%s (mode: apply), proceeding with full update workflow: %s",
+                        where,
+                        update_url,
+                    )
                     
                     if update_state.is_blocked(update_url, _running_version()):
-                        logger.warning(
-                            f"Not applying {update_url}: it was already attempted "
-                            f"{update_state.MAX_UPDATE_ATTEMPTS} times from this version without success "
-                            f"(failed to boot, or cancelled). Waiting for a newer update; "
-                            f"remove {update_state.STATE_FILE} to retry."
+                        logger.log(
+                            loop_log.blocked_level(update_url),
+                            "Not applying %s: it was already attempted %s times from this version without success "
+                            "(failed to boot, or cancelled); waiting for a newer update, remove %s to retry",
+                            update_url,
+                            update_state.MAX_UPDATE_ATTEMPTS,
+                            update_state.STATE_FILE,
                         )
                         success = False
                     else:
@@ -830,19 +916,19 @@ def main_loop(config: dict, maintenance_entry: Optional[dict] = None) -> None:
                         logger.info("Tryboot reboot initiated - daemon exiting")
                         sys.exit(0)
                     else:
-                        logger.info("Update not applied - continuing normal operation")
+                        logger.debug("Update not applied - continuing normal operation")
                 # else: nothing mode already handled above
             else:
-                logger.info("No updates available")
+                logger.debug("No updates available")
             
             # Sleep until next check
             delay = next_check_delay(check_interval, do_mode, maintenance_entry, in_maintenance_window)
-            logger.info(f"Next update check in {delay:.0f} seconds")
+            loop_log.succeeded()
+            logger.debug("Next update check in %.0f seconds", delay)
             sleep_interruptible(delay)
             
-        except Exception as e:
-            logger.error(f"Error in main loop: {e}", exc_info=True)
-            logger.info("Continuing operation despite error")
+        except Exception as e:  # noqa: BLE001 - logged by loop_log; the daemon keeps running
+            loop_log.failed(e)
             
             # Sleep a bit before retrying
             time.sleep(60)
@@ -862,8 +948,7 @@ def run_daemon(config_path: Path, schedule_path: Optional[Path] = None, verbose:
     # Configure logging
     configure_logging("tsupdated", verbose=verbose, default_level=logging.WARNING)
     
-    logger.info("Starting tsupdated - automatic update daemon")
-    logger.info(f"Configuration file: {config_path}")
+    logger.info("Starting tsupdated, the automatic update daemon, with configuration file %s", config_path)
     
     # Check if running as root
     if not is_root():
@@ -882,16 +967,15 @@ def run_daemon(config_path: Path, schedule_path: Optional[Path] = None, verbose:
     # Load schedule and find maintenance entry
     maintenance_entry = None
     if schedule_path:
-        logger.info(f"Schedule file: {schedule_path}")
         schedule = load_schedule(schedule_path)
         if schedule:
             maintenance_entry = find_maintenance_entry(schedule)
             if maintenance_entry:
-                logger.info("Maintenance schedule loaded successfully")
+                logger.info("Maintenance schedule loaded from %s", schedule_path)
             else:
-                logger.info("No maintenance entry found in schedule - updates can be applied at any time")
+                logger.info("No maintenance entry found in %s, updates can be applied at any time", schedule_path)
         else:
-            logger.info("Schedule file not found or invalid - updates can be applied at any time")
+            logger.info("Schedule file %s not found or invalid, updates can be applied at any time", schedule_path)
     
     # Handle tryboot persistence on startup
     finalize_boot(config.get("persist_timeout", 600))
@@ -901,8 +985,8 @@ def run_daemon(config_path: Path, schedule_path: Optional[Path] = None, verbose:
         main_loop(config, maintenance_entry=maintenance_entry)
     except KeyboardInterrupt:
         logger.info("Interrupted by keyboard - shutting down")
-    except Exception as e:
-        logger.error(f"Unexpected error in daemon: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Unexpected error in daemon")
         sys.exit(1)
     
     logger.info("Daemon shutdown complete")

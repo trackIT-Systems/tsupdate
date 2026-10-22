@@ -33,7 +33,7 @@ def _load(path: Optional[Path] = None) -> dict:
     except FileNotFoundError:
         return {}
     except (OSError, ValueError) as e:
-        logger.warning(f"Ignoring unreadable state file {path}: {e}")
+        logger.warning("Ignoring unreadable state file %s: %s", path, e)
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -49,7 +49,7 @@ def _save(data: dict, path: Optional[Path] = None) -> None:
             os.fsync(f.fileno())
         os.replace(tmp, path)
     except OSError as e:
-        logger.error(f"Could not write state file {path}: {e}")
+        logger.error("Could not write state file %s: %s", path, e)
 
 
 def record_attempt(update_url: str, from_version: Optional[str]) -> int:
@@ -77,7 +77,7 @@ def discard_attempt() -> None:
     try:
         STATE_FILE.unlink(missing_ok=True)
     except OSError as e:
-        logger.warning(f"Could not remove state file {STATE_FILE}: {e}")
+        logger.warning("Could not remove state file %s: %s", STATE_FILE, e)
 
 
 def is_blocked(update_url: str, current_version: Optional[str]) -> bool:
@@ -101,7 +101,11 @@ def forget_if_version_changed(current_version: Optional[str]) -> bool:
         return False
     data = _load()
     if data and data.get("from_version") != current_version:
-        logger.info(f"Running version changed ({data.get('from_version')} -> {current_version}); clearing update state")
+        logger.info(
+            "Running version changed (%s -> %s); clearing update state",
+            data.get('from_version'),
+            current_version,
+        )
         discard_attempt()
         return True
     return False
